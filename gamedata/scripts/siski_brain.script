@@ -24,6 +24,18 @@ local megabrain = siski_megabrain
 -- Local Registry of Brains
 -- [squad_id] = BrainInstance
 local brains = {}
+local brains_rr_ids = {}
+local brains_rr_dirty = true
+local brains_rr_index = 1
+
+local discover_ids = {}
+local discover_index = 1
+local discover_snapshot_tg = 0
+local discover_next_snapshot_tg = 0
+
+local last_update_global = 0
+local last_tick_global = 0
+local last_brain_update_error_at = {}
 
 function get_brain(id)
     return brains[id]
@@ -72,6 +84,24 @@ local function is_valid_squad(squad)
     end
 
     return true
+end
+
+local function rebuild_brains_rr()
+    brains_rr_ids = {}
+    for id, _ in pairs(brains) do
+        brains_rr_ids[#brains_rr_ids + 1] = id
+    end
+    brains_rr_index = 1
+    brains_rr_dirty = false
+end
+
+local function is_squad_on_actor_level(sq)
+    if not (sq and sq.m_game_vertex_id) then return false end
+    local gv = game_graph():vertex(sq.m_game_vertex_id)
+    if not gv then return false end
+    local sq_lvl = alife():level_name(gv:level_id())
+    if not sq_lvl then return false end
+    return sq_lvl == level.name()
 end
 
 -- [CRASH PREVENTION] Safely force NPC out of dangerous schemes (Smart Cover, Kamp, etc.)
@@ -1356,63 +1386,113 @@ function on_game_start()
     if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return end
     logger.siski_log("BRAIN", "INFO", "Module Initializing...")
 
-    -- DELAY START: Reduce load lag and race conditions with other mods (like swm_legs)
-    -- We wait 5 seconds before the first brain update ticks.
-    last_update_global = time_global() + 3000
-
-    RegisterScriptCallback("actor_on_update", update_brains)
+    local tg = time_global()
+    local start_delay_ms = settings and settings.get_config and settings.get_config("brain_start_delay_ms", 3000) or 3000
+    last_tick_global = tg + start_delay_ms
+    discover_next_snapshot_tg = tg + start_delay_ms
 end
-
-local last_update_global = 0
-local last_discovery_global = 0
-local last_brain_update_error_at = {}
 
 function update_brains()
     if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return end
     local tg = time_global()
 
-    -- 1. UPDATE EXISTING BRAINS (Every 2 seconds)
-    if tg > last_update_global + 2000 then
-        last_update_global = tg
+    local tick_interval_ms = settings and settings.get_config and settings.get_config("brain_tick_interval_ms", 200) or 200
+    if tg < last_tick_global + tick_interval_ms then return end
+    last_tick_global = tg
 
-        -- Cleanup Dead Brains
-        for id, brain in pairs(brains) do
+    local offline_interval_ms = settings and settings.get_config and settings.get_config("brain_offline_interval_ms", 2000) or 2000
+    local online_interval_ms = settings and settings.get_config and settings.get_config("brain_online_interval_ms", 800) or 800
+    local tick_budget_ms = settings and settings.get_config and settings.get_config("brain_tick_budget_ms", 4) or 4
+    local tick_budget_brains = settings and settings.get_config and settings.get_config("brain_tick_budget_brains", 16) or 16
+
+    if brains_rr_dirty then
+        rebuild_brains_rr()
+    end
+
+    local started_tg = tg
+    local processed = 0
+    local rr_len = #brains_rr_ids
+    while rr_len > 0 and processed < tick_budget_brains do
+        local id = brains_rr_ids[brains_rr_index]
+        brains_rr_index = brains_rr_index + 1
+        if brains_rr_index > rr_len then brains_rr_index = 1 end
+
+        local brain = id and brains[id] or nil
+        if brain then
             local sq = alife_object(id)
             if not sq then
                 logger.siski_log("BRAIN", "INFO", "Squad [%s] removed. Cleaning up Brain and Memory.", id)
                 memory.unregister_squad(id)
                 brains[id] = nil
+                brains_rr_dirty = true
+            else
+                brain.squad = sq
+                local due_at = brain.next_update_global or 0
+                if tg >= due_at then
+                    local online = false
+                    local ok_level, is_on_level = pcall(function() return is_squad_on_actor_level(sq) end)
+                    if ok_level and is_on_level then online = true end
+
+                    brain.is_online = online
+                    local ok, err = pcall(function() brain:update() end)
+                    if not ok then
+                        local now = time_global()
+                        if not last_brain_update_error_at[id] or (now - last_brain_update_error_at[id]) > 5000 then
+                            last_brain_update_error_at[id] = now
+                            logger.siski_log("BRAIN", "ERR", "Brain update failed for squad [%s]: %s", tostring(id), tostring(err))
+                        end
+                    end
+
+                    brain.next_update_global = tg + (online and online_interval_ms or offline_interval_ms)
+                end
             end
+        else
+            brains_rr_dirty = true
         end
 
-        -- Update Existing
-        for id, brain in pairs(brains) do
-            local ok, err = pcall(function() brain:update() end)
-            if not ok then
-                local now = time_global()
-                if not last_brain_update_error_at[id] or (now - last_brain_update_error_at[id]) > 5000 then
-                    last_brain_update_error_at[id] = now
-                    logger.siski_log("BRAIN", "ERR", "Brain update failed for squad [%s]: %s", tostring(id), tostring(err))
-                end
+        processed = processed + 1
+        if (time_global() - started_tg) >= tick_budget_ms then break end
+        if brains_rr_dirty then
+            rebuild_brains_rr()
+            rr_len = #brains_rr_ids
+        end
+    end
+
+    local discover_interval_ms = settings and settings.get_config and settings.get_config("brain_discover_interval_ms", 10000) or 10000
+    local discover_batch = settings and settings.get_config and settings.get_config("brain_discover_batch", 50) or 50
+
+    if tg >= discover_next_snapshot_tg then
+        discover_ids = {}
+        discover_index = 1
+        discover_snapshot_tg = tg
+        discover_next_snapshot_tg = tg + discover_interval_ms
+
+        if SIMBOARD and SIMBOARD.squads then
+            for id, _ in pairs(SIMBOARD.squads) do
+                discover_ids[#discover_ids + 1] = id
             end
         end
     end
 
-    -- 2. DISCOVER NEW SQUADS (Every 10 seconds - Expensive Loop!)
-    if tg > last_discovery_global + 10000 then
-        last_discovery_global = tg
+    if SIMBOARD and SIMBOARD.squads and discover_index <= #discover_ids then
+        local d_processed = 0
+        while discover_index <= #discover_ids and d_processed < discover_batch do
+            local id = discover_ids[discover_index]
+            discover_index = discover_index + 1
 
-        if SIMBOARD then
-            for id, squad in pairs(SIMBOARD.squads) do
+            if id and not brains[id] then
+                local squad = SIMBOARD.squads[id]
                 local squad_obj = squad
                 if type(squad) == "boolean" then squad_obj = alife_object(id) end
-
                 if squad_obj and squad_obj.player_id then
-                    if not brains[id] then
-                        try_register_brain(id, squad_obj)
+                    if try_register_brain(id, squad_obj) then
+                        brains_rr_dirty = true
                     end
                 end
             end
+
+            d_processed = d_processed + 1
+            if (time_global() - started_tg) >= tick_budget_ms then break end
         end
     end
 end
@@ -1427,6 +1507,7 @@ function try_register_brain(id, squad_obj)
     if squad_data and squad_data.spawned_by_siski then
         brains[id] = SquadBrain(squad_obj, squad_data)
         logger.siski_log("BRAIN", "INFO", "Brain attached to [%s] (SISKI Controlled)", squad_obj:name())
+        brains_rr_dirty = true
         return true
     end
 
@@ -1437,6 +1518,7 @@ function try_register_brain(id, squad_obj)
             squad_data = state.squads[id]
             brains[id] = SquadBrain(squad_obj, squad_data)
             logger.siski_log("BRAIN", "INFO", "Brain attached to [%s] (Vanilla Squad: %s)", squad_obj:name(), sec)
+            brains_rr_dirty = true
             return true
         end
     end
