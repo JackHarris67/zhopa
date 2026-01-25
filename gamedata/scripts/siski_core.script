@@ -123,7 +123,7 @@ local function apply_runtime_fixes()
 end
 
 local function gc_watch_enabled()
-    return ui_mcm and ui_mcm.get and ui_mcm.get("siski/debug_enabled") == true
+    return false
 end
 
 local gc_watch_initialized = false
