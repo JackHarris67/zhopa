@@ -16,7 +16,7 @@ local enable_npc_trade = true
 local enable_npc_upgrade = true
 local max_upgrades_per_visit = 5
 local DEBUG_PREFIX = "[ZHOPA][AXR_TRADE] "
-local ZHOPA_AXR_PATCH_REV = "2026-04-14-r8-provider-intent-guard"
+local ZHOPA_AXR_PATCH_REV = "big_penis_version228"
 local ZHOPA_AXR_BIND_DIAG = {
 	next_tg = 0,
 }
