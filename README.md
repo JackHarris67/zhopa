@@ -46,7 +46,7 @@ ZHOPA — модульная ALife-надстройка для Anomaly 1.5.3, к
 
 ## Репозиторий
 - Основной bootstrap: [`gamedata/scripts/zhopa.script`](gamedata/scripts/zhopa.script)
-- Runtime callback hub: [`gamedata/scripts/zhopa_core.script`](gamedata/scripts/zhopa_core.script)
+- Runtime bundle: [`gamedata/scripts/zhopa.script`](gamedata/scripts/zhopa.script)
 - Основной config: [`gamedata/configs/zhopa_settings.ltx`](gamedata/configs/zhopa_settings.ltx)
-- MCM schema: [`gamedata/scripts/zhopa_mcm_schema.script`](gamedata/scripts/zhopa_mcm_schema.script)
+- MCM adapter: [`gamedata/scripts/zhopa_mcm.script`](gamedata/scripts/zhopa_mcm.script)
 - Дизайн-документ: [`docs/zhopa_0.7_design_document.md`](docs/zhopa_0.7_design_document.md)

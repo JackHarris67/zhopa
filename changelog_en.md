@@ -31,7 +31,7 @@
 ### New
 - Full migration to a decentralized runtime model built around `squad_on_update`. Previously the simulation relied on one main loop that distributed tasks between squads; now each squad individually asks ZHOPA for a task. This gives a major performance boost and noticeably reduces ZHOPA-caused lag, stutter, and FPS drops.
 - Added compatibility with Alife Plus. `zhopa_ap_bridge` now hands squads over to Alife Plus when it wants to control them, and takes them back when it no longer needs them.
-- Added `smart_service_slot_doctor.script`. The script looks for NPCs stuck after trading or mechanic service; when it finds one, it checks how long the NPC has been standing there and detaches the stuck NPC if nothing is happening.
+- Added the `smart_service_slot_doctor` runtime module. It looks for NPCs stuck after trading or mechanic service; when it finds one, it checks how long the NPC has been standing there and detaches the stuck NPC if nothing is happening.
 - Refactored MCM settings. Removed all options that became pointless under the new architecture. Performance tuning is now reduced to a single slider, `Off-level squad update skipping`: the higher the value, the less often offline squads are updated, which significantly reduces ZHOPA load on weaker PCs or in heavily overpopulated Zone scenarios. Recommended value for 1500-1700 stalkers or the `Anthology` modpack is `3`. If you play without `AOE` / `MT-TEST`, the recommended value is `3-4`.
 
 ### Fixes

@@ -46,7 +46,7 @@ If you install ZHOPA over older ZHOPA/REZNYA versions, reset the mod settings in
 
 ## Repository
 - Main bootstrap: [`gamedata/scripts/zhopa.script`](gamedata/scripts/zhopa.script)
-- Runtime callback hub: [`gamedata/scripts/zhopa_core.script`](gamedata/scripts/zhopa_core.script)
+- Runtime bundle: [`gamedata/scripts/zhopa.script`](gamedata/scripts/zhopa.script)
 - Main config: [`gamedata/configs/zhopa_settings.ltx`](gamedata/configs/zhopa_settings.ltx)
-- MCM schema: [`gamedata/scripts/zhopa_mcm_schema.script`](gamedata/scripts/zhopa_mcm_schema.script)
+- MCM adapter: [`gamedata/scripts/zhopa_mcm.script`](gamedata/scripts/zhopa_mcm.script)
 - Design document: [`docs/zhopa_0.7_design_document_en.md`](docs/zhopa_0.7_design_document_en.md)

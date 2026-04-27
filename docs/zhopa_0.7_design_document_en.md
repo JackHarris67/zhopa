@@ -26,7 +26,7 @@ Architecture invariants:
 ## 2. Bootstrap and Runtime Flow
 
 ### 2.1 Load order
-Current `gamedata/scripts/zhopa.script` order:
+Current `gamedata/scripts/zhopa.script` is a monolithic runtime bundle. Internal logical block order:
 1. `zhopa_oop`
 2. `zhopa_switches`
 3. `zhopa_bus`
@@ -45,17 +45,19 @@ Current `gamedata/scripts/zhopa.script` order:
 16. `zhopa_story_events`
 17. `zhopa_smart_tasks`
 18. `zhopa_trade`
-19. `axr_trade_manager`
-20. `zhopa_tasks_registry`
-21. `zhopa_mutants`
-22. `zhopa_base_filler`
-23. `zhopa_dynamic_bases`
-24. `zhopa_service_filler`
-25. `zhopa_axr_task_patch`
-26. `zhopa_loot`
-27. `zhopa_loot_patch`
-28. `zhopa_fast_trading`
-29. `zhopa_debug_hud`
+19. `zhopa_tasks_registry`
+20. `zhopa_mutants`
+21. `zhopa_base_filler`
+22. `zhopa_dynamic_bases`
+23. `zhopa_service_filler`
+24. `zhopa_axr_task_patch`
+25. `zhopa_loot`
+26. `zhopa_loot_patch`
+27. `zhopa_fast_trading`
+28. `zhopa_debug_hud`
+29. `smart_service_slot_doctor`
+
+`axr_trade_manager.script` remains a separate external bridge required during startup. `zhopa_mcm.script` remains a separate MCM adapter with an embedded schema copy.
 
 ### 2.2 Startup hook order
 1. `zhopa.loot.on_game_start()`
@@ -64,8 +66,9 @@ Current `gamedata/scripts/zhopa.script` order:
 4. `zhopa.npc_faction_override.on_game_start()`
 5. `zhopa.heli_guard_patch.on_game_start()`
 6. `zhopa.board_index.on_game_start()`
-7. `axr_trade_manager.on_game_start()`
-8. `zhopa.core.on_game_start()`
+7. `smart_service_slot_doctor.on_game_start()`
+8. `axr_trade_manager.on_game_start()`
+9. `zhopa.core.on_game_start()`
 
 `zhopa_story_events`, `zhopa_smart_tasks`, and `zhopa_story_psy_watchdog` subscribe to the bus when loaded and refresh subscriptions on load-related events.
 

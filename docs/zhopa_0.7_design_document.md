@@ -26,7 +26,7 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 ## 2. Bootstrap и runtime поток
 
 ### 2.1 Порядок загрузки
-Актуальный порядок `gamedata/scripts/zhopa.script`:
+`gamedata/scripts/zhopa.script` теперь монолитный runtime bundle. Внутренний порядок логических блоков:
 1. `zhopa_oop`
 2. `zhopa_switches`
 3. `zhopa_bus`
@@ -45,17 +45,19 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 16. `zhopa_story_events`
 17. `zhopa_smart_tasks`
 18. `zhopa_trade`
-19. `axr_trade_manager`
-20. `zhopa_tasks_registry`
-21. `zhopa_mutants`
-22. `zhopa_base_filler`
-23. `zhopa_dynamic_bases`
-24. `zhopa_service_filler`
-25. `zhopa_axr_task_patch`
-26. `zhopa_loot`
-27. `zhopa_loot_patch`
-28. `zhopa_fast_trading`
-29. `zhopa_debug_hud`
+19. `zhopa_tasks_registry`
+20. `zhopa_mutants`
+21. `zhopa_base_filler`
+22. `zhopa_dynamic_bases`
+23. `zhopa_service_filler`
+24. `zhopa_axr_task_patch`
+25. `zhopa_loot`
+26. `zhopa_loot_patch`
+27. `zhopa_fast_trading`
+28. `zhopa_debug_hud`
+29. `smart_service_slot_doctor`
+
+`axr_trade_manager.script` остается отдельным внешним bridge, который подключается при startup. `zhopa_mcm.script` остается отдельным MCM adapter со встроенной копией schema.
 
 ### 2.2 Порядок startup hooks
 1. `zhopa.loot.on_game_start()`
@@ -64,8 +66,9 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 4. `zhopa.npc_faction_override.on_game_start()`
 5. `zhopa.heli_guard_patch.on_game_start()`
 6. `zhopa.board_index.on_game_start()`
-7. `axr_trade_manager.on_game_start()`
-8. `zhopa.core.on_game_start()`
+7. `smart_service_slot_doctor.on_game_start()`
+8. `axr_trade_manager.on_game_start()`
+9. `zhopa.core.on_game_start()`
 
 `zhopa_story_events`, `zhopa_smart_tasks` и `zhopa_story_psy_watchdog` подписываются на bus сами при загрузке и восстанавливают подписки после load-событий.
 
