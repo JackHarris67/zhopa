@@ -1,0 +1,72 @@
+zhopa = zhopa or {}
+
+zhopa.version = "1.0.1"
+
+local function safe_require(name)
+    local ok = pcall(require, name)
+    return ok
+end
+
+function zhopa.on_game_start()
+    safe_require("zhopa_oop")
+    safe_require("zhopa_switches")
+    safe_require("zhopa_bus")
+    safe_require("zhopa_timers")
+    safe_require("zhopa_core")
+    safe_require("zhopa_safe")
+    safe_require("zhopa_log")
+    safe_require("zhopa_heli_guard_patch")
+    safe_require("zhopa_mcm_schema")
+    safe_require("zhopa_config")
+    safe_require("zhopa_board_index")
+    safe_require("zhopa_npc_faction_override")
+    safe_require("zhopa_xr_conditions_patch")
+    safe_require("zhopa_memory")
+    safe_require("zhopa_story_psy_watchdog")
+    safe_require("zhopa_story_events")
+    safe_require("zhopa_smart_tasks")
+    safe_require("zhopa_trade")
+    safe_require("axr_trade_manager")
+    safe_require("zhopa_tasks_registry")
+    safe_require("zhopa_mutants")
+    safe_require("zhopa_base_filler")
+    safe_require("zhopa_dynamic_bases")
+    safe_require("zhopa_service_filler")
+    safe_require("zhopa_axr_task_patch")
+    safe_require("zhopa_loot")
+    safe_require("zhopa_loot_patch")
+    safe_require("zhopa_fast_trading")
+    safe_require("zhopa_debug_hud")
+
+    if zhopa.loot and zhopa.loot.on_game_start then
+        zhopa.loot.on_game_start()
+    end
+
+    if zhopa.loot_patch and zhopa.loot_patch.on_game_start then
+        zhopa.loot_patch.on_game_start()
+    end
+
+    if zhopa.fast_trading and zhopa.fast_trading.on_game_start then
+        zhopa.fast_trading.on_game_start()
+    end
+
+    if zhopa.npc_faction_override and zhopa.npc_faction_override.on_game_start then
+        zhopa.npc_faction_override.on_game_start()
+    end
+
+    if zhopa.heli_guard_patch and zhopa.heli_guard_patch.on_game_start then
+        zhopa.heli_guard_patch.on_game_start()
+    end
+
+    if zhopa.board_index and zhopa.board_index.on_game_start then
+        zhopa.board_index.on_game_start()
+    end
+
+    if axr_trade_manager and axr_trade_manager.on_game_start then
+        axr_trade_manager.on_game_start()
+    end
+
+    if zhopa.core and zhopa.core.on_game_start then
+        zhopa.core.on_game_start()
+    end
+end
