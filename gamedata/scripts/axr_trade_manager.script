@@ -898,8 +898,9 @@ local function finalize_service_session(npc, kind, reason)
 		)
 	end
 	local source = status == "completed" and "service_complete" or "service_fail"
-	if smart_service_slot_doctor and type(smart_service_slot_doctor.on_axr_service_result) == "function" then
-		pcall(smart_service_slot_doctor.on_axr_service_result, npc, smart, kind, status, reason)
+	local doctor = zhopa and zhopa.smart_service_slot_doctor or nil
+	if doctor and type(doctor.on_axr_service_result) == "function" then
+		pcall(doctor.on_axr_service_result, npc, smart, kind, status, reason)
 	end
 	notify_zhopa_trade_service_result(npc, smart, source, tostring(kind), status, tostring(reason))
 end

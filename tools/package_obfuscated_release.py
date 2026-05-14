@@ -16,6 +16,7 @@ from pathlib import Path
 SIDECAR_SCRIPTS = {
     Path("gamedata/scripts/zhopa.script"): Path("gamedata/scripts/zhopa.script.ljbc"),
     Path("gamedata/scripts/zhopa_mcm.script"): Path("gamedata/scripts/zhopa_mcm.script.ljbc"),
+    Path("gamedata/scripts/zhopa_mcm_schema.script"): Path("gamedata/scripts/zhopa_mcm_schema.script.ljbc"),
 }
 
 STUB_SOURCE = """local n = script_name()

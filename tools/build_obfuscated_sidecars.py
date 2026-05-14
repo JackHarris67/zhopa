@@ -26,6 +26,7 @@ from typing import Iterable
 DEFAULT_INPUTS = (
     Path("gamedata/scripts/zhopa.script"),
     Path("gamedata/scripts/zhopa_mcm.script"),
+    Path("gamedata/scripts/zhopa_mcm_schema.script"),
 )
 
 BLACKLIST_TERMS = (
@@ -280,7 +281,6 @@ def transform_code_segment(code: str) -> str:
         dotted_definition,
         code,
     )
-    code = re.sub(r"\bsmart_service_slot_doctor\b", "__z_svc", code)
     code = re.sub(r"\bzhopa\b", "__z_root", code)
     code = re.sub(
         r"(\b[A-Za-z_][A-Za-z0-9_]*(?:\s*(?:\.\s*[A-Za-z_][A-Za-z0-9_]*|\[[^\]]+\]))*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)",
@@ -300,7 +300,6 @@ def protect_lua_source(source: str) -> str:
     output: list[str] = []
     code: list[str] = []
     saw_zhopa = re.search(r"\bzhopa\b", source) is not None
-    saw_service = re.search(r"\bsmart_service_slot_doctor\b", source) is not None
 
     def flush_code() -> None:
         if code:
@@ -360,9 +359,6 @@ def protect_lua_source(source: str) -> str:
     if saw_zhopa:
         prelude.append('local __z_root = _G["zhopa"] or {}')
         prelude.append('_G["zhopa"] = __z_root')
-    if saw_service:
-        prelude.append('local __z_svc = _G["smart_service_slot_doctor"] or {}')
-        prelude.append('_G["smart_service_slot_doctor"] = __z_svc')
     if prelude:
         return "\n".join(prelude) + "\n" + transformed
     return transformed

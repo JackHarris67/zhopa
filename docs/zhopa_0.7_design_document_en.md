@@ -53,19 +53,17 @@ Current `gamedata/scripts/zhopa.script` is a monolithic runtime bundle. Internal
 24. `zhopa_loot_patch`
 25. `zhopa_fast_trading`
 26. `zhopa_debug_hud`
-27. `smart_service_slot_doctor`
+27. `zhopa.smart_service_slot_doctor`
 
 `axr_trade_manager.script` remains a separate external bridge required during startup. `zhopa_mcm.script` remains a separate MCM adapter. `zhopa_mcm_schema.script` is the single schema source used by runtime config and MCM.
 
 ### 2.2 Startup hook order
 1. `zhopa.loot.on_game_start()`
 2. `zhopa.loot_patch.on_game_start()`
-3. `zhopa.fast_trading.on_game_start()`
-4. `zhopa.npc_faction_override.on_game_start()`
-5. `zhopa.heli_guard_patch.on_game_start()`
-6. `zhopa.board_index.on_game_start()`
-7. `axr_trade_manager.on_game_start()`
-8. `zhopa.core.on_game_start()`
+3. `zhopa.npc_faction_override.on_game_start()`
+4. `zhopa.heli_guard_patch.on_game_start()`
+5. `axr_trade_manager.on_game_start()`
+6. `zhopa.core.on_game_start()`
 
 `zhopa_story_events`, `zhopa_smart_tasks`, and `zhopa_story_psy_watchdog` expose direct methods called by `zhopa.core`.
 
@@ -116,7 +114,7 @@ Removed legacy structures:
 - hidden steady-state maintenance loops.
 
 ### 3.2 `zhopa_board_index`
-`zhopa_board_index` owns the reactive world index.
+`zhopa_board_index` owns runtime-only read-through views.
 
 It tracks:
 - `smarts_by_level`
@@ -247,13 +245,9 @@ Helper groups:
 ## 6. World Index: `zhopa.board_index`
 
 ### Responsibility
-This module owns ZHOPA's current world map: smarts, squads, topology, and revisions.
+This module owns runtime-only read-through views for smarts, squads, topology, and revisions.
 
 ### Public API
-- `reset_runtime(reason)`
-- `save_state(m_data)`
-- `load_state(m_data)`
-- `on_game_start()`
 - `get_level_smarts(level_name, opts_or_fn)`
 - `get_base_smarts(level_name, opts_or_fn)`
 - `get_respawn_base_smarts(level_name, opts_or_fn)`
@@ -271,14 +265,14 @@ This module owns ZHOPA's current world map: smarts, squads, topology, and revisi
 - squad level tracking on enter/leave/after_level_change;
 - neighbor topology rebuild from level-changer data;
 - cached per-level view materialization with revisions;
-- diagnostics counters for broken or missing data.
+- bounded failure notes for broken or missing data.
 
 ### Helper clusters
-- bucket helpers: `append_level_value`, `set_level_value`, `unset_level_value`, `build_sorted_bucket_array`;
-- topology helpers: `merge_unique_arrays`, `append_level_edge`, `edge_sets_to_arrays`, `copy_edge_map`, `copy_array_map`, `copy_level_changer_edges`;
+- bucket helpers: `set_level_value`, `unset_level_value`, `build_sorted_bucket_array`;
+- topology helpers: `merge_unique_arrays`, `append_level_edge`, `edge_sets_to_arrays`;
 - state packet helpers: `make_state_packet`, `get_level_changer_data`, `get_level_changer_data_fallback`;
 - filtering helpers: `is_base_smart`, `is_respawn_base_smart`, `is_level_name`, `level_from_object`, `object_name`;
-- diagnostics: `create_runtime`, `ensure_diag`, `diag_inc`, `diag_push`, `diag_fail`, `diag_last`.
+- runtime cache helpers: `create_runtime`, cached view invalidation, and revision bumps.
 
 ## 7. Authority Layer: `zhopa.memory`
 
@@ -308,25 +302,25 @@ This module owns ZHOPA's current world map: smarts, squads, topology, and revisi
 - `mark_level_changed(squad_id, old_level, new_level, source)`
 - `prune_missing_squads_once(source)`
 - `consume_dirty(entry, key)`
-- `get_memory_stats()`
 - `is_protected_squad(se_squad)`
 - `should_manage_squad(se_squad)`
 - `on_squad_npc_death(...)`
-- `reset_runtime(reason)`
 - `save_state(m_data)`
 - `load_state(m_data)`
 - `set_surge_lock(squad_id, locked)`
 - `get_surge_lock(squad_id)`
 
 ### Stored state
-- entry snapshots;
-- `task.current` / `task.prev` / `task.next`;
-- dirty flags;
-- last-seen time;
-- trade/anchor/occupancy indexes;
+- save-safe squad task state;
 - protected squad markers;
 - surge lock markers;
 - normalized loaded state.
+
+Runtime-only, rebuilt from live engine/SIMBOARD data:
+- entry snapshots;
+- dirty flags;
+- last-seen time;
+- trade/anchor/occupancy indexes.
 
 ### Helper clusters
 - sanitization: `clone_serializable`, `compact_task`, `compact_entry`, `_normalize_loaded_task`, `_normalize_loaded_entry`;
@@ -344,7 +338,7 @@ This module owns ZHOPA's current world map: smarts, squads, topology, and revisi
 2. validates serializable fields;
 3. indexes entries by level/smart/community;
 4. marks dirty state for consumers;
-5. exposes save/load blobs with no userdata or engine references.
+5. saves only Z.H.O.P.A.-owned task and lock state; live identity/index data is rebuilt from engine/SIMBOARD.
 
 ## 8. Stalker Task FSM: `zhopa.tasks_registry`
 
@@ -355,7 +349,6 @@ This is the main stalker task engine. It builds, selects, validates, and complet
 - `update_squad_tasks(se_squad, ctx)`
 - `on_first_update()`
 - `on_option_change()`
-- `get_runtime_stats()`
 - `force_rest_after_external_reclaim(se_squad, source)`
 - `is_smart_spawn_allowed(smart_name, community, level_name, section_name)`
 - `build_base_camping_task(...)`
@@ -558,7 +551,6 @@ Public entry points:
 - `save_state(m_data)`
 - `load_state(m_data)`
 - `is_base_camper_section(section)`
-- `get_runtime_stats()`
 
 Algorithm:
 - index target smarts;
@@ -577,10 +569,8 @@ Reactive owner recompute for dynamic bases.
 
 Public entry points:
 - `on_first_update()`
-- `reset_runtime(reason)`
 - `save_state(m_data)`
 - `load_state(m_data)`
-- `get_runtime_stats()`
 - `get_effective_owner(smart)`
 
 Algorithm:
@@ -595,10 +585,8 @@ Reactive per-smart service-role population module.
 
 Public entry points:
 - `on_first_update()`
-- `reset_runtime(reason)`
 - `save_state(m_data)`
 - `load_state(m_data)`
-- `get_runtime_stats()`
 - `is_service_section(section)`
 - `get_task_proxy_seed(npc)`
 
@@ -610,7 +598,7 @@ Algorithm:
 - keep pending spawn state and retry cooldowns local.
 
 Key helper clusters:
-- role classification: `section_role`, `section_owner_alias`, `classify_provider_job_role`, `classify_job_role`, `role_profile`;
+- role classification: `section_role`, `section_owner_alias`, `classify_provider_job_role`, `classify_job_role`;
 - spawn gating: `smart_has_non_service_population`, `skip_retry_ready`, `set_skip_retry`, `clear_skip_retry`, `ensure_warfare_ignore`;
 - pending state: `pending_bucket`, `get_pending_spawn`, `set_pending_spawn`, `clear_pending_spawn`, `resolve_holder_squad`, `pin_service_squad`, `sync_pending_for_role`;
 - target sync: `sync_targets_from_index`, `mark_target_dirty`, `mark_all_index_targets_dirty`, `process_smart`, `run_dirty_reconcile`.
@@ -628,12 +616,8 @@ Public entry points:
 - `on_game_start()`
 - `is_recent_item_id(id)`
 - `has_corpse_event_id(id)`
-- `has_item_event_id(id)`
-- `iter_corpse_event_ids()`
-- `iter_item_event_ids()`
 - `get_corpse_event_ids()`
 - `get_item_event_ids()`
-- `get_event_stats()`
 - `is_protected_corpse(corpse)`
 - `is_protected_corpse_id(id)`
 - `sync_protected_corpse_lootability(id)`
@@ -717,7 +701,6 @@ Current knobs include:
 
 ### 19.2 Save/load owners
 `zhopa.core` delegates save/load to:
-- `zhopa.board_index`
 - `zhopa.memory`
 - `zhopa.dynamic_bases`
 - `zhopa.base_filler`
@@ -772,8 +755,6 @@ Public entry points:
 - `on_npc_item_take(npc, item)`
 - `on_trade_completed(squad_id, result)`
 - `consume_pending_trigger(squad_id)`
-- `on_game_start()`
-- `get_runtime_stats()`
 - `reset_cache()`
 
 Algorithm:
@@ -788,13 +769,11 @@ Separate mutant FSM, not tied to stalker roam logic.
 
 Public entry points:
 - `update_squad_tasks(se_squad, ctx)`
-- `get_runtime_stats()`
-- `reset_runtime(reason)`
 
 Key functions and clusters:
 - night/day detection: `is_night_now`, `is_predator_phase_inactive`;
 - phase detection: `normalize_predator_phase_alias_key`, `detect_predator_phase_from_text`, `_resolve_predator_phase`;
-- board/safety: `validate_live_squad_with_memory`, `resolve_entry_level`, `is_hunt_enabled`, `is_surge_active`;
+- board/safety: `resolve_entry_level`, `is_hunt_enabled`, `is_surge_active`;
 - blacklists: `smart_blacklists_*`, `faction_*_blacklists_*`, `section_*_blacklists_*`;
 - task flow: `make_task`, `build_rest_task`, `_build_hunt_task`, `_build_explore_task`, `_build_patrol_task`, `_pick_day_roam_task`, `_pick_first_task`, `_rotate_task`, `_is_task_target_valid`, `_is_task_completed`, `_apply_task`;
 - presence model: `_ensure_hunt_presence_slot`, `_add_hunt_presence`, `_apply_hunt_presence_marks`, `_clear_hunt_presence_for_sid`, `_process_stalker_presence`, `_bootstrap_presence_from_board`;

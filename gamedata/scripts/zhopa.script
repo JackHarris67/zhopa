@@ -211,6 +211,7 @@ local tonumber = _G.tonumber
 local tostring = _G.tostring
 local alife = _G.alife
 local game_graph = _G.game_graph
+local time_global = _G.time_global
 
 
 local Core = zhopa.class("Core")
@@ -299,7 +300,9 @@ local function current_actor_level_name()
     return nil
 end
 
-local function get_offlevel_squad_update_skip_count()
+local OFFLEVEL_SKIP_CFG_CACHE_MS = 1000
+
+local function read_offlevel_squad_update_skip_count()
     local cfg = zhopa.config
     if not (cfg and cfg.get) then
         return 0
@@ -325,6 +328,7 @@ end
 
 
 local PREVALIDATED_CTX = { prevalidated = true }
+local debug_hud_enabled
 
 local function update_memory_snapshot(squad, source)
     if not (squad and zhopa.memory) then
@@ -421,13 +425,17 @@ end
 local function route_squad_first_update(squad, entry)
     call_module_method("board_index", "board_index", "on_squad_first_update", "board_index.on_squad_first_update", squad)
     call_module_method("mutants", "mutants", "on_squad_first_update", "mutants.on_squad_first_update", squad, entry)
-    call_module_method("debug_hud", "debug_hud", "on_squad_first_update", "debug_hud.on_squad_first_update", squad)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_squad_first_update", "debug_hud.on_squad_first_update", squad)
+    end
 end
 
 local function route_squad_update(squad, entry)
     call_module_method("board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad)
     call_module_method("mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry)
-    call_module_method("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad)
+    end
 end
 
 local function route_squad_npc_creation(squad, npc, smart)
@@ -444,7 +452,9 @@ local function route_squad_npc_death(squad, npc, killer_npc, killer_squad)
     call_module_method("base_filler", "base_filler", "on_squad_npc_death", "base_filler.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
     call_module_method("dynamic_bases", "dynamic_bases", "on_squad_npc_death", "dynamic_bases.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
     call_module_method("service_filler", "service_filler", "on_squad_npc_death", "service_filler.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
-    call_module_method("debug_hud", "debug_hud", "on_squad_npc_death", "debug_hud.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_squad_npc_death", "debug_hud.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    end
 end
 
 local function route_squad_enter_smart(squad, smart, entry)
@@ -469,7 +479,9 @@ local function route_squad_after_level_change(squad, old_level, new_level, entry
     call_module_method("base_filler", "base_filler", "on_squad_after_level_change", "base_filler.on_squad_after_level_change", squad, old_level, new_level)
     call_module_method("dynamic_bases", "dynamic_bases", "on_squad_after_level_change", "dynamic_bases.on_squad_after_level_change", squad, old_level, new_level)
     call_module_method("service_filler", "service_filler", "on_squad_after_level_change", "service_filler.on_squad_after_level_change", squad, old_level, new_level)
-    call_module_method("debug_hud", "debug_hud", "on_squad_after_level_change", "debug_hud.on_squad_after_level_change", squad, old_level, new_level)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_squad_after_level_change", "debug_hud.on_squad_after_level_change", squad, old_level, new_level)
+    end
 end
 
 local function route_actor_first_update()
@@ -482,7 +494,9 @@ local function route_actor_first_update()
     call_module_method("mutants", "mutants", "on_actor_first_update", "mutants.on_actor_first_update")
     call_module_method(nil, "loot_patch", "on_actor_first_update", "loot_patch.on_actor_first_update")
     call_module_method(nil, "smart_service_slot_doctor", "on_actor_first_update", "smart_service_slot_doctor.on_actor_first_update")
-    call_module_method("debug_hud", "debug_hud", "on_actor_first_update", "debug_hud.on_actor_first_update")
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_actor_first_update", "debug_hud.on_actor_first_update")
+    end
 end
 
 local function route_option_change()
@@ -498,7 +512,9 @@ local function route_option_change()
     call_module_method("service_filler", "service_filler", "on_option_change", "service_filler.on_option_change")
     call_module_method(nil, "loot", "on_option_change", "loot.on_option_change")
     call_module_method(nil, "fast_trading", "on_option_change", "fast_trading.on_option_change")
-    call_module_method("debug_hud", "debug_hud", "on_option_change", "debug_hud.on_option_change")
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_option_change", "debug_hud.on_option_change")
+    end
 end
 
 local function route_save_state(m_data)
@@ -521,7 +537,9 @@ local function route_load_state(m_data)
     call_module_method(nil, "loot_patch", "on_load_state", "loot_patch.on_load_state", m_data)
     call_module_method(nil, "fast_trading", "on_load_state", "fast_trading.on_load_state", m_data)
     call_module_method(nil, "smart_service_slot_doctor", "on_load_state", "smart_service_slot_doctor.on_load_state", m_data)
-    call_module_method("debug_hud", "debug_hud", "on_load_state", "debug_hud.on_load_state", m_data)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_load_state", "debug_hud.on_load_state", m_data)
+    end
 end
 
 local function route_server_entity_register(se_obj, type_name)
@@ -545,7 +563,9 @@ local function route_server_entity_unregister(se_obj, type_name)
     call_module_method("dynamic_bases", "dynamic_bases", "on_server_entity_unregister", "dynamic_bases.on_server_entity_unregister", se_obj, type_name)
     call_module_method("service_filler", "service_filler", "on_server_entity_unregister", "service_filler.on_server_entity_unregister", se_obj, type_name)
     call_module_method(nil, "smart_service_slot_doctor", "on_server_entity_unregister", "smart_service_slot_doctor.on_server_entity_unregister", se_obj, type_name)
-    call_module_method("debug_hud", "debug_hud", "on_server_entity_unregister", "debug_hud.on_server_entity_unregister", se_obj, type_name)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_server_entity_unregister", "debug_hud.on_server_entity_unregister", se_obj, type_name)
+    end
 end
 
 local function route_smart_terrain_update(smart)
@@ -582,14 +602,16 @@ end
 
 local function route_task_current_changed(payload)
     call_module_method("smart_tasks", "smart_tasks", "on_task_current_changed", "smart_tasks.on_task_current_changed", payload)
-    call_module_method("debug_hud", "debug_hud", "on_task_current_changed", "debug_hud.on_task_current_changed", payload)
+    if debug_hud_enabled and debug_hud_enabled() then
+        call_module_method("debug_hud", "debug_hud", "on_task_current_changed", "debug_hud.on_task_current_changed", payload)
+    end
 end
 
 local function route_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
     call_module_method(nil, "trade", "on_trade_service_result", "trade.on_trade_service_result", squad_id, npc_id, smart_name, source, phase, status, reason)
 end
 
-local function debug_hud_enabled()
+function debug_hud_enabled()
     if runtime_enabled_now() ~= true then
         return false
     end
@@ -619,11 +641,25 @@ end
 function Core:__init()
     self.config_refresh_tg = 0
     self.offlevel_skip_counter_by_sid = {}
+    self.offlevel_skip_cfg_value = 0
+    self.offlevel_skip_cfg_next_tg = 0
     self.master_enabled_prev = nil
 end
 
 function Core:_reset_offlevel_skip_counters()
     self.offlevel_skip_counter_by_sid = {}
+    self.offlevel_skip_cfg_next_tg = 0
+end
+
+function Core:_get_offlevel_squad_update_skip_count()
+    local now = (time_global and time_global()) or 0
+    if now < (tonumber(self.offlevel_skip_cfg_next_tg) or 0) then
+        return tonumber(self.offlevel_skip_cfg_value) or 0
+    end
+    local value = read_offlevel_squad_update_skip_count()
+    self.offlevel_skip_cfg_value = value
+    self.offlevel_skip_cfg_next_tg = now + OFFLEVEL_SKIP_CFG_CACHE_MS
+    return value
 end
 
 function Core:_forget_offlevel_skip_counter(squad_id)
@@ -638,7 +674,7 @@ function Core:_forget_offlevel_skip_counter(squad_id)
 end
 
 function Core:_should_skip_offlevel_squad_update(squad)
-    local skip_count = get_offlevel_squad_update_skip_count()
+    local skip_count = self:_get_offlevel_squad_update_skip_count()
     if skip_count <= 0 or not squad then
         return false
     end
@@ -803,9 +839,6 @@ function Core:_on_option_change()
 end
 
 function Core:_save_state(m_data)
-    if can_run("board_index") and zhopa.board_index and zhopa.board_index.save_state then
-        safe_call("zhopa.board_index.save_state", zhopa.board_index.save_state, m_data)
-    end
     if can_run("debug_hud") and debug_hud_enabled() and zhopa.debug_hud and zhopa.debug_hud.on_save_state then
         safe_call("zhopa.debug_hud.on_save_state", zhopa.debug_hud.on_save_state)
     end
@@ -829,9 +862,6 @@ function Core:_load_state(m_data)
     self:_reset_offlevel_skip_counters()
     self:_sync_log_level()
     self.master_enabled_prev = self:_is_enabled()
-    if can_run("board_index") and zhopa.board_index and zhopa.board_index.load_state then
-        safe_call("zhopa.board_index.load_state", zhopa.board_index.load_state, m_data)
-    end
     if can_run("memory") and zhopa.memory and zhopa.memory.load_state then
         safe_call("zhopa.memory.load_state", zhopa.memory.load_state, m_data)
     end
@@ -2867,60 +2897,6 @@ local function edge_sets_to_arrays(src)
     return out
 end
 
-local function copy_edge_map(src)
-    local out = {}
-    for level_name, set in pairs(src or {}) do
-        if type(level_name) == "string" and level_name ~= "" and type(set) == "table" then
-            local dst = {}
-            for other_level, ok in pairs(set) do
-                if ok == true and type(other_level) == "string" and other_level ~= "" then
-                    dst[other_level] = true
-                end
-            end
-            out[level_name] = dst
-        end
-    end
-    return out
-end
-
-local function copy_array_map(src)
-    local out = {}
-    for level_name, arr in pairs(src or {}) do
-        if type(level_name) == "string" and level_name ~= "" and type(arr) == "table" then
-            local dst = {}
-            for i = 1, #arr do
-                local other_level = arr[i]
-                if type(other_level) == "string" and other_level ~= "" then
-                    dst[#dst + 1] = other_level
-                end
-            end
-            if table_sort then
-                table_sort(dst)
-            end
-            out[level_name] = dst
-        end
-    end
-    return out
-end
-
-local function copy_level_changer_edges(src)
-    local out = {}
-    for id, edge in pairs(src or {}) do
-        local nid = tonumber(id) or nil
-        if nid and type(edge) == "table" then
-            local source_level = type(edge.source_level) == "string" and edge.source_level or nil
-            local dest_level = type(edge.dest_level) == "string" and edge.dest_level or nil
-            if source_level and dest_level and source_level ~= "" and dest_level ~= "" then
-                out[nid] = {
-                    source_level = source_level,
-                    dest_level = dest_level,
-                }
-            end
-        end
-    end
-    return out
-end
-
 local function make_state_packet(sobj)
     if not (sobj and net_packet) then
         return nil
@@ -3722,8 +3698,13 @@ function BoardIndex:_on_squad_first_update(squad)
 end
 
 function BoardIndex:_on_squad_update(squad)
+    local sid = tonumber(squad and squad.id) or nil
+    local level_name = now_level_name_by_gvid(tonumber(squad and squad.m_game_vertex_id) or 0)
+    if sid and level_name and self.RUNTIME.squad_level_by_id[sid] == level_name then
+        return
+    end
     self:_diag_callback("squad_on_update")
-    self:_upsert_squad_from_object(squad and squad.id or nil, squad, "squad_on_update")
+    self:_upsert_squad_from_object(sid, squad, "squad_on_update")
 end
 
 function BoardIndex:_on_squad_enter_smart(squad, smart)
@@ -3761,13 +3742,6 @@ function BoardIndex:_on_bootstrap()
         and next(self.RUNTIME.transition_edges_by_level or {}) ~= nil
     then
         self:_rebuild_neighbors()
-    end
-end
-
-function BoardIndex:_reset_runtime(reason)
-    self.RUNTIME = create_runtime()
-    if zhopa.log and zhopa.log.warn then
-        zhopa.log.warn("BOARD_INDEX", "reset_runtime reason=%s", tostring(reason or "-"))
     end
 end
 
@@ -3832,38 +3806,6 @@ function BoardIndex:_hydrate_live_runtime(source)
 
     self.RUNTIME.live_hydrated = true
     return hydrated_any
-end
-
-function BoardIndex:_save_state(m_data)
-    if type(m_data) ~= "table" then
-        return
-    end
-    m_data.zhopa_board_index = {
-        neighbors_by_level = self.RUNTIME.neighbors_by_level or {},
-        transition_edges_by_level = self.RUNTIME.transition_edges_by_level or {},
-        level_changer_edges_by_id = self.RUNTIME.level_changer_edges_by_id or {},
-    }
-end
-
-function BoardIndex:_load_state(m_data)
-    local data = type(m_data) == "table" and m_data.zhopa_board_index or nil
-    if type(data) ~= "table" then
-        return
-    end
-    self.RUNTIME = create_runtime()
-    self.RUNTIME.transition_edges_by_level = copy_edge_map(data.transition_edges_by_level)
-    self.RUNTIME.neighbors_by_level = copy_array_map(data.neighbors_by_level)
-    self.RUNTIME.level_changer_edges_by_id = copy_level_changer_edges(data.level_changer_edges_by_id)
-    self.RUNTIME.topology_revision_by_level = {}
-    for level_name in pairs(self.RUNTIME.neighbors_by_level or {}) do
-        self.RUNTIME.topology_revision_by_level[level_name] = 1
-    end
-    if next(self.RUNTIME.neighbors_by_level or {}) == nil
-        and next(self.RUNTIME.transition_edges_by_level or {}) ~= nil
-    then
-        self:_rebuild_neighbors()
-    end
-    self:_hydrate_live_runtime("load_state")
 end
 
 function BoardIndex:_materialize_level_bucket(cache_name, revision_kind, map, level_name, numeric)
@@ -4014,10 +3956,6 @@ if not inst.RUNTIME then
     BoardIndex.__init(inst)
 end
 
-inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
-inst.save_state = function(m_data) return inst:_save_state(m_data) end
-inst.load_state = function(m_data) return inst:_load_state(m_data) end
-inst.on_game_start = function() return true end
 inst.on_actor_first_update = function() return inst:_on_bootstrap() end
 inst.on_load_state = function() return inst:_on_bootstrap() end
 inst.on_server_entity_register = function(se_obj, type_name) return inst:_on_server_entity_register(se_obj, type_name) end
@@ -5257,46 +5195,16 @@ local function compact_entry(entry)
     end
 
     set_if("squad_id", tonumber(entry.squad_id), nil)
-    set_if("level", entry.level, nil)
-    set_if("level_gvid", tonumber(entry.level_gvid), nil)
-    set_if("community", entry.community, nil)
-    set_if("section", entry.section, nil)
     set_if("npc_kind", entry.npc_kind, nil)
-    set_if("identity_source", entry.identity_source, nil)
     set_if("allowed", entry.allowed, nil)
-    set_if("smart_id", entry.smart_id, nil)
-    set_if("scripted_target", entry.scripted_target, nil)
-    set_if("current_action", entry.current_action, nil)
-    set_if("assigned_target_id", entry.assigned_target_id, nil)
-    set_if("commander_id", tonumber(entry.commander_id), nil)
-    set_if("m_game_vertex_id", tonumber(entry.m_game_vertex_id), nil)
     set_if("home_level", entry.home_level, nil)
     set_if("surge_lock", entry.surge_lock == true and true or nil, nil)
-    set_if("last_seen_tg", tonumber(entry.last_seen_tg), 0)
-    set_if("updated_at_tg", tonumber(entry.updated_at_tg), 0)
-    set_if("last_seen_source", entry.last_seen_source, nil)
-    set_if("community_verified_tg", tonumber(entry.community_verified_tg), 0)
-    set_if("level_verified_tg", tonumber(entry.level_verified_tg), 0)
-    set_if("section_verified_tg", tonumber(entry.section_verified_tg), 0)
-    set_if("identity_refresh_next_tg", tonumber(entry.identity_refresh_next_tg), 0)
 
     if type(entry.tasks) == "table" then
         local tp = compact_task(entry.tasks.prev)
         local tc = compact_task(entry.tasks.current)
         if tp or tc then
             out.tasks = { prev = tp, current = tc }
-        end
-    end
-
-    if type(entry.dirty) == "table" then
-        local d = {}
-        if entry.dirty.level == true then d.level = true end
-        if entry.dirty.community == true then d.community = true end
-        if entry.dirty.smart == true then d.smart = true end
-        if entry.dirty.task == true then d.task = true end
-        if entry.dirty.identity == true then d.identity = true end
-        if next(d) ~= nil then
-            out.dirty = d
         end
     end
 
@@ -6244,34 +6152,6 @@ function Memory:_consume_dirty(entry, key)
     return v
 end
 
-function Memory:_get_memory_stats()
-    local out = {
-        total = 0,
-        managed_levels = 0,
-        anchor_communities = 0,
-        trade_target_levels = 0,
-        integrity_reject_count = tonumber(self.RUNTIME.integrity_reject_count) or 0,
-        integrity_purge_count = tonumber(self.RUNTIME.integrity_purge_count) or 0,
-        integrity_soft_fail_count = tonumber(self.RUNTIME.integrity_soft_fail_count) or 0,
-        touch_create_blocked_count = tonumber(self.RUNTIME.touch_create_blocked_count) or 0,
-    }
-    for _, e in pairs(self.STATE.squads or {}) do
-        if type(e) == "table" then
-            out.total = out.total + 1
-        end
-    end
-    for _ in pairs(self.RUNTIME.managed_squads_by_level or {}) do
-        out.managed_levels = out.managed_levels + 1
-    end
-    for _ in pairs(self.RUNTIME.anchors_by_community_level or {}) do
-        out.anchor_communities = out.anchor_communities + 1
-    end
-    for _ in pairs(self.RUNTIME.trade_target_occupancy or {}) do
-        out.trade_target_levels = out.trade_target_levels + 1
-    end
-    return out
-end
-
 function Memory:_normalize_loaded_task(task)
     if type(task) ~= "table" then return task end
     reset_task_scheduler_fields(task)
@@ -6293,15 +6173,27 @@ function Memory:_normalize_loaded_entry(id, src, now)
     e.integrity_soft_fail_count = 0
     e.integrity_soft_fail_window_tg = 0
 
-    e.community_verified_tg = tonumber(e.community_verified_tg) or 0
-    e.level_verified_tg = tonumber(e.level_verified_tg) or 0
-    e.section_verified_tg = tonumber(e.section_verified_tg) or 0
+    e.community_verified_tg = 0
+    e.level_verified_tg = 0
+    e.section_verified_tg = 0
     e.identity_refresh_next_tg = 0
     e.updated_at_tg = tonumber(e.updated_at_tg) or now
     e.last_seen_tg = tonumber(e.last_seen_tg) or e.updated_at_tg
     e.commander_id = tonumber(e.commander_id) or nil
     e.npc_kind = (e.npc_kind == "mutant" or e.npc_kind == "stalker") and e.npc_kind or nil
     e.identity_source = type(e.identity_source) == "string" and e.identity_source or nil
+
+    e.level = nil
+    e.level_gvid = nil
+    e.community = nil
+    e.section = nil
+    e.smart_id = nil
+    e.scripted_target = nil
+    e.current_action = nil
+    e.assigned_target_id = nil
+    e.commander_id = nil
+    e.m_game_vertex_id = nil
+    e.identity_source = nil
 
     if e.npc_kind == "mutant" then
         -- Mutant task/target state is cheap to rebuild and can preserve stuck paths across saves.
@@ -6520,14 +6412,6 @@ function Memory:_on_squad_npc_death(squad_or_id, npc, killer_npc, killer_squad)
     end
 end
 
-function Memory:_reset_runtime(reason)
-    self:_reset_runtime_tables()
-    self:_rebuild_runtime_indexes()
-    if zhopa.log and zhopa.log.warn then
-        zhopa.log.warn("MEMORY", "reset_runtime reason=%s", tostring(reason or "-"))
-    end
-end
-
 function Memory:_save_state(m_data)
     if not m_data then return end
     self.STATE.version = STATE_VERSION
@@ -6621,11 +6505,9 @@ inst.mark_left_target = function(squad_id, smart_ref, source) return inst:_mark_
 inst.mark_level_changed = function(squad_id, old_level, new_level, source) return inst:_mark_level_changed(squad_id, old_level, new_level, source) end
 inst.prune_missing_squads_once = function(source) return inst:_prune_missing_squads_once(source) end
 inst.consume_dirty = function(entry, key) return inst:_consume_dirty(entry, key) end
-inst.get_memory_stats = function() return inst:_get_memory_stats() end
 inst.is_protected_squad = function(se_squad) return inst:_is_protected_squad(se_squad) end
 inst.should_manage_squad = function(se_squad) return inst:_should_manage_squad(se_squad) end
 inst.on_squad_npc_death = function(squad_or_id, npc, killer_npc, killer_squad) return inst:_on_squad_npc_death(squad_or_id, npc, killer_npc, killer_squad) end
-inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_actor_first_update = function()
@@ -7522,7 +7404,6 @@ local function on_squad_after_level_change(squad)
     try_process_squad(squad, "squad_on_after_level_change")
 end
 
-watchdog.on_game_start = function() return true end
 watchdog.reconcile_all_levels = reconcile_all_levels
 watchdog.on_actor_first_update = on_actor_first_update
 watchdog.on_load_state = on_load_state
@@ -9299,7 +9180,6 @@ local function on_server_entity_unregister(se_obj)
     end
 end
 
-story_events.on_game_start = function() return true end
 story_events.save_state = save_state_blob
 story_events.load_state = function(m_data)
     load_state_blob(m_data)
@@ -11451,7 +11331,6 @@ local function on_squad_leave_smart(_, smart)
     end
 end
 
-smart_tasks.on_game_start = function() return true end
 smart_tasks.reactivate_runtime = reactivate_runtime
 smart_tasks.update_squad_tasks = update_squad_tasks_impl
 smart_tasks.on_actor_first_update = on_actor_first_update
@@ -11807,7 +11686,7 @@ function trade.consume_trade_started(squad_id, expected_target)
     return true, evt
 end
 
-function trade.reset_runtime()
+local function reset_trade_runtime()
     RUNTIME.trade_started_by_squad = {}
     RUNTIME.service_event_by_squad = {}
     RUNTIME.surge_cache_active = false
@@ -12237,11 +12116,11 @@ function trade.tick(se_squad, entry, task)
 end
 
 function trade.on_load_state()
-    trade.reset_runtime()
+    reset_trade_runtime()
 end
 
 function trade.on_option_change()
-    trade.reset_runtime()
+    reset_trade_runtime()
 end
 
 function trade.on_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
@@ -17419,17 +17298,6 @@ function tasks.on_option_change()
     end
 end
 
-function tasks.get_runtime_stats()
-    local prep = RUNTIME.build_prep or {}
-    local prep_stats = prep.stats or {}
-    return {
-        build_ctx_hits = tonumber(prep_stats.ctx_hits) or 0,
-        build_ctx_misses = tonumber(prep_stats.ctx_misses) or 0,
-        build_populate_hits = tonumber(prep_stats.populate_hits) or 0,
-        build_populate_misses = tonumber(prep_stats.populate_misses) or 0,
-    }
-end
-
 function tasks.force_rest_after_external_reclaim(se_squad, source)
     if not se_squad then
         return false
@@ -18289,15 +18157,6 @@ local function is_rest_done(task)
     local dur = tonumber(p.duration_ms) or 0
     if dur <= 0 then return true end
     return tg() >= (started + dur)
-end
-
-local function count_keys(tbl)
-    if type(tbl) ~= "table" then return 0 end
-    local n = 0
-    for _ in pairs(tbl) do
-        n = n + 1
-    end
-    return n
 end
 
 local function pick_next_patrol_target(task, avoid_smart_name)
@@ -19596,21 +19455,6 @@ function Mutants:_update_squad_tasks(se_squad, ctx)
     end
 end
 
-function Mutants:_reset_runtime(reason)
-    self.RUNTIME.hunt_presence_by_level = {}
-    self.RUNTIME.hunt_presence_by_sid = {}
-    self.RUNTIME.hunt_cache_tg = 0
-    self.RUNTIME.hunt_level_smarts_cache = {}
-    self.RUNTIME.hunt_level_smarts_rev = {}
-    self.RUNTIME.hunt_pass_obj_cache = {}
-    self.RUNTIME.hunt_pass_level_cache = {}
-    self.RUNTIME.hunt_pass_smart_cache = {}
-    self.RUNTIME.hunt_pass_exists_cache = {}
-    if zhopa.log and zhopa.log.warn then
-        zhopa.log.warn("MUTANTS", "reset_runtime reason=%s", tostring(reason or "-"))
-    end
-end
-
 function Mutants:_reset_presence_runtime()
     self.RUNTIME.hunt_presence_by_level = {}
     self.RUNTIME.hunt_presence_by_sid = {}
@@ -19649,45 +19493,12 @@ function Mutants:_bootstrap_presence_from_board(source)
     end
 end
 
-function Mutants:_get_runtime_stats()
-    local levels = count_keys(self.RUNTIME.hunt_presence_by_level)
-    return {
-        updates = tonumber(self.RUNTIME.updates) or 0,
-        completions = tonumber(self.RUNTIME.completions) or 0,
-        last_update_tg = tonumber(self.RUNTIME.last_update_tg) or 0,
-        hunt_cache_tg = tonumber(self.RUNTIME.hunt_cache_tg) or 0,
-        hunt_presence_levels = levels,
-        hunt_cache_hits = tonumber(self.RUNTIME.hunt_cache_hits) or 0,
-        hunt_cache_miss = tonumber(self.RUNTIME.hunt_cache_miss) or 0,
-        hunt_targets_picked = tonumber(self.RUNTIME.hunt_targets_picked) or 0,
-        hunt_pick_same_level = tonumber(self.RUNTIME.hunt_pick_same_level) or 0,
-        hunt_pick_neighbor_level = tonumber(self.RUNTIME.hunt_pick_neighbor_level) or 0,
-        hunt_pick_bucket_in_smart = tonumber(self.RUNTIME.hunt_pick_bucket_in_smart) or 0,
-        hunt_pick_bucket_r5 = tonumber(self.RUNTIME.hunt_pick_bucket_r5) or 0,
-        hunt_pick_bucket_r10 = tonumber(self.RUNTIME.hunt_pick_bucket_r10) or 0,
-        hunt_pick_bucket_r30 = tonumber(self.RUNTIME.hunt_pick_bucket_r30) or 0,
-        hunt_pick_bucket_r50 = tonumber(self.RUNTIME.hunt_pick_bucket_r50) or 0,
-        predator_phase_resolved_count = tonumber(self.RUNTIME.predator_phase_resolved_count) or 0,
-        predator_phase_day_count = tonumber(self.RUNTIME.predator_phase_day_count) or 0,
-        predator_phase_night_count = tonumber(self.RUNTIME.predator_phase_night_count) or 0,
-        phase_rest_forced_count = tonumber(self.RUNTIME.phase_rest_forced_count) or 0,
-        phase_rest_forced_day_count = tonumber(self.RUNTIME.phase_rest_forced_day_count) or 0,
-        phase_rest_forced_night_count = tonumber(self.RUNTIME.phase_rest_forced_night_count) or 0,
-        night_forced_count = tonumber(self.RUNTIME.night_forced_count) or 0,
-        night_fallback_rest_count = tonumber(self.RUNTIME.night_fallback_rest_count) or 0,
-        day_hunt_released_count = tonumber(self.RUNTIME.day_hunt_released_count) or 0,
-        target_resync_count = tonumber(self.RUNTIME.target_resync_count) or 0,
-    }
-end
-
 local inst = Mutants.new and Mutants.new() or setmetatable({}, Mutants)
 if not inst.RUNTIME then
     Mutants.__init(inst)
 end
 
 inst.update_squad_tasks = function(se_squad, ctx) return inst:_update_squad_tasks(se_squad, ctx) end
-inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
-inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.on_actor_first_update = function()
     inst:_reset_presence_runtime()
     inst:_bootstrap_presence_from_board("actor_first_update")
@@ -21460,21 +21271,6 @@ function BaseFiller:_load_state(m_data)
     self:_log_info("load_state empty_state=true")
 end
 
-function BaseFiller:_get_runtime_stats()
-    local src = self.RUNTIME and self.RUNTIME.stats or {}
-    local out = {}
-    for k, v in pairs(src) do
-        out[k] = v
-    end
-    out.targets = tonumber(src.targets) or 0
-    out.initial_fill_done = self.RUNTIME.initial_fill_done == true
-    out.daily_fill_mark = self:_get_level_fill_mark(loaded_level_name())
-    out.default_fill_mark = self.STATE and self.STATE.default_last_fill_gt or nil
-    out.level_fill_marks = count_keys(self.STATE and self.STATE.last_fill_gt_by_level or nil)
-    out.target_levels = count_keys(self.RUNTIME and self.RUNTIME.targets_by_level or nil)
-    return out
-end
-
 local inst = BaseFiller.new and BaseFiller.new() or setmetatable({}, BaseFiller)
 if not inst.RUNTIME then
     BaseFiller.__init(inst)
@@ -21503,7 +21299,6 @@ inst.on_server_entity_unregister = function(se_obj)
     end
 end
 inst.is_base_camper_section = function(section) return is_base_camper_section(section) end
-inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.on_squad_enter_smart = function(squad) return inst:_mark_dirty_from_squad(squad, false, "enter_smart") end
 inst.on_squad_leave_smart = function(squad) return inst:_mark_dirty_from_squad(squad, false, "leave_smart") end
 inst.on_squad_after_level_change = function(squad) return inst:_mark_dirty_from_squad(squad, false, "after_level_change") end
@@ -22436,22 +22231,6 @@ function DynamicBases:_on_first_update()
     self:_reactivate_runtime("first_update")
 end
 
-function DynamicBases:_reset_runtime(reason)
-    self.RUNTIME.targets = {}
-    self.RUNTIME.target_set = {}
-    self.RUNTIME.dirty_targets = {}
-    self.RUNTIME.original_by_name = {}
-    self.RUNTIME.applied_signature_by_name = {}
-    self.RUNTIME.owner_by_name = {}
-    self.RUNTIME.active_enabled = false
-    self.RUNTIME.disabled_logged = false
-    self.RUNTIME.reconcile_running = false
-    self.RUNTIME.reconcile_pending = false
-    if zhopa.log and zhopa.log.warn then
-        zhopa.log.warn("DYNAMIC_BASES", "reset_runtime reason=%s", tostring(reason or "-"))
-    end
-end
-
 function DynamicBases:_save_state(m_data)
     if not m_data then
         return
@@ -22480,16 +22259,6 @@ function DynamicBases:_load_state(m_data)
     self.RUNTIME.reconcile_pending = false
 end
 
-function DynamicBases:_get_runtime_stats()
-    local out = {}
-    for key, value in pairs(self.RUNTIME and self.RUNTIME.stats or {}) do
-        out[key] = value
-    end
-    out.targets = #(self.RUNTIME.targets or {})
-    out.touched = count_keys(self.RUNTIME.original_by_name)
-    return out
-end
-
 local inst = DynamicBases.new and DynamicBases.new() or setmetatable({}, DynamicBases)
 if not inst.RUNTIME then
     DynamicBases.__init(inst)
@@ -22504,7 +22273,6 @@ local function mark_dynamic_base_from_squad(squad, reason)
 end
 
 inst.on_first_update = function() return inst:_on_first_update() end
-inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
@@ -22528,7 +22296,6 @@ inst.on_server_entity_unregister = function(se_obj)
     end
     return false
 end
-inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.get_effective_owner = function(smart) return inst:_resolve_effective_owner_alias(smart) end
 inst.on_squad_enter_smart = function(squad) return mark_dynamic_base_from_squad(squad, "enter_smart") end
 inst.on_squad_leave_smart = function(squad) return mark_dynamic_base_from_squad(squad, "leave_smart") end
@@ -24263,22 +24030,6 @@ function ServiceFiller:_reactivate_runtime(reason)
     self:_run_dirty_reconcile(reason or "reactivate")
 end
 
-function ServiceFiller:_reset_runtime(reason)
-    self.RUNTIME.targets = {}
-    self.RUNTIME.target_set = {}
-    self.RUNTIME.dirty_targets = {}
-    self.RUNTIME.skip_retry_tg_by_smart = {}
-    self.RUNTIME.pending_spawn_by_smart_role = {}
-    self.RUNTIME.warfare_ignore_installed = false
-    self.RUNTIME.active_enabled = false
-    self.RUNTIME.disabled_logged = false
-    self.RUNTIME.reconcile_running = false
-    self.RUNTIME.reconcile_pending = false
-    if zhopa.log and zhopa.log.warn then
-        zhopa.log.warn("SERVICE_FILLER", "reset_runtime reason=%s", tostring(reason or "-"))
-    end
-end
-
 function ServiceFiller:_save_state(m_data)
     if not m_data then
         return
@@ -24324,33 +24075,12 @@ function ServiceFiller:_load_state(m_data)
     self.RUNTIME.reconcile_pending = false
 end
 
-function ServiceFiller:_get_runtime_stats()
-    local out = {}
-    for key, value in pairs(self.RUNTIME and self.RUNTIME.stats or {}) do
-        out[key] = value
-    end
-    out.targets = tonumber(self.RUNTIME and self.RUNTIME.stats and self.RUNTIME.stats.targets) or 0
-    out.fill_marks = count_keys(self.STATE and self.STATE.last_fill_gt_by_smart or nil)
-    local pending_total = 0
-    for _, bucket in pairs(self.RUNTIME and self.RUNTIME.pending_spawn_by_smart_role or {}) do
-        if type(bucket) == "table" then
-            for _ in pairs(bucket) do
-                pending_total = pending_total + 1
-            end
-        end
-    end
-    out.pending_spawns = pending_total
-    out.warfare_ignore_installed = self.RUNTIME and self.RUNTIME.warfare_ignore_installed or false
-    return out
-end
-
 local inst = ServiceFiller.new and ServiceFiller.new() or setmetatable({}, ServiceFiller)
 if not inst.RUNTIME then
     ServiceFiller.__init(inst)
 end
 
 inst.on_first_update = function() return inst:_on_first_update() end
-inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
@@ -24372,7 +24102,6 @@ inst.on_server_entity_unregister = function(se_obj, type_name)
         inst:_mark_target_dirty(smart_name, "server_unregister")
     end
 end
-inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.is_service_section = function(section) return is_service_section(section) end
 inst.get_task_proxy_seed = function(npc) return inst:_get_task_proxy_seed(npc) end
 inst.on_squad_enter_smart = function(squad) return inst:_mark_dirty_from_squad(squad, "enter_smart") end
@@ -26793,42 +26522,12 @@ function fast_trading.consume_pending_trigger(squad_id)
     return pending
 end
 
-function fast_trading.on_game_start()
-    return true
-end
-
 function fast_trading.on_load_state()
     fast_trading.reset_cache()
 end
 
 function fast_trading.on_option_change()
     fast_trading.reset_cache()
-end
-
-function fast_trading.get_runtime_stats()
-    return {
-        pending_count = (function()
-            local n = 0
-            for _ in pairs(fast_trading.RUNTIME.pending_checks) do n = n + 1 end
-            return n
-        end)(),
-        active_trades = (function()
-            local n = 0
-            for _ in pairs(fast_trading.RUNTIME.active_trades) do n = n + 1 end
-            return n
-        end)(),
-        cooldown_count = (function()
-            local n = 0
-            for _ in pairs(fast_trading.RUNTIME.cooldowns) do n = n + 1 end
-            return n
-        end)(),
-        trigger_prefixes = get_trigger_prefixes(),
-        pending_by_squad = (function()
-            local n = 0
-            for _ in pairs(fast_trading.RUNTIME.pending_by_squad) do n = n + 1 end
-            return n
-        end)(),
-    }
 end
 
 function fast_trading.reset_cache()
@@ -27324,7 +27023,8 @@ end; zhopa_bundle_module(); zhopa_bundle_module = nil
 
 -- BEGIN module smart_service_slot_doctor
 zhopa_bundle_module = function()
-smart_service_slot_doctor = smart_service_slot_doctor or {}
+zhopa = zhopa or {}
+zhopa.smart_service_slot_doctor = zhopa.smart_service_slot_doctor or {}
 
 local type = _G.type
 local pcall = _G.pcall
@@ -27343,7 +27043,7 @@ local load_var = _G.load_var
 local utils_data = _G.utils_data
 local utils_obj = _G.utils_obj
 
-local inst = smart_service_slot_doctor
+local inst = zhopa.smart_service_slot_doctor
 
 local SCAN_COOLDOWN_MS = 250
 local ACTION_COOLDOWN_MS = 2000
@@ -28955,20 +28655,12 @@ function zhopa.on_game_start()
         zhopa.loot_patch.on_game_start()
     end
 
-    if zhopa.fast_trading and zhopa.fast_trading.on_game_start then
-        zhopa.fast_trading.on_game_start()
-    end
-
     if zhopa.npc_faction_override and zhopa.npc_faction_override.on_game_start then
         zhopa.npc_faction_override.on_game_start()
     end
 
     if zhopa.heli_guard_patch and zhopa.heli_guard_patch.on_game_start then
         zhopa.heli_guard_patch.on_game_start()
-    end
-
-    if zhopa.board_index and zhopa.board_index.on_game_start then
-        zhopa.board_index.on_game_start()
     end
 
     if axr_trade_manager and axr_trade_manager.on_game_start then
