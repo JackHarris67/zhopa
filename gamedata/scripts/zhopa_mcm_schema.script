@@ -10,7 +10,6 @@ local OPTION_DEFS = {
     story_events_enabled = { type = "check", val = 1, def = true },
     story_events_north_migration_enabled = { type = "check", val = 1, def = true },
     story_events_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 33 },
-    home_region_attachment_enabled = { type = "check", val = 1, def = true },
     story_psy_watchdog_enabled = { type = "check", val = 1, def = true },
     mutant_sim_enabled = { type = "check", val = 1, def = true },
     mutant_explore_enabled = { type = "check", val = 1, def = true },
@@ -85,7 +84,6 @@ local PANELS = {
                 id = "world",
                 text = "ui_mcm_zhopa_group_general_world",
                 options = {
-                    "home_region_attachment_enabled",
                     "npc_faction_override_enabled",
                     "story_psy_watchdog_enabled",
                 },

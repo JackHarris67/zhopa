@@ -484,7 +484,7 @@ Runtime-only, перестраивается из live engine/SIMBOARD data:
 - identity and claims: `build_identity_from_entry`, `build_identity_from_task`, `is_enemy_identity`, `current_identity_count`, `add_runtime_claim`, `remove_runtime_claim`;
 - candidate flow: `candidate_distance`, `candidate_position_distance`, `candidate_reject_reason`, `pick_control_candidate`;
 - conflict resolution: `validate_current_control_claim`, `build_control_claim_snapshot`, `sort_control_claim_snapshots`, `resolve_control_conflicts`, `reconcile_control_smart`, `reconcile_smart`, `try_fill_control_smart_jobs_once`;
-- runtime maintenance: `dirty_smart_names`, `process_dirty_smarts`, `rebuild_runtime_claims_from_memory`, `mark_all_known_smarts_dirty`, `reactivate_runtime`.
+- runtime maintenance: FIFO dirty smart queue, `process_dirty_smarts`, `rebuild_runtime_claims_from_memory`, `mark_all_known_smarts_dirty`, `reactivate_runtime`.
 
 ## 12. Story subsystem: `zhopa.story_events`
 

@@ -137,12 +137,6 @@
     <string id="ui_mcm_zhopa_smart_tasks_control_max_squads_per_faction_desc">
         <text>Maximum number of claimed squads with the same identity that may hold or travel to one control smart.</text>
     </string>
-    <string id="ui_mcm_zhopa_home_region_attachment_enabled">
-        <text>Squads: remember home region</text>
-    </string>
-    <string id="ui_mcm_zhopa_home_region_attachment_enabled_desc">
-        <text>Stores the first verified level as the squad home region for later logic.</text>
-    </string>
     <string id="ui_mcm_zhopa_mutant_sim_enabled">
         <text>Mutants: participate in simulation</text>
     </string>

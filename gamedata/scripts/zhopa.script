@@ -235,6 +235,10 @@ local function safe_call(tag, fn, ...)
 end
 
 local function master_enabled_now()
+    local runtime_cfg = zhopa and zhopa.runtime_cfg
+    if runtime_cfg and runtime_cfg.get then
+        return runtime_cfg.get("enabled", true) == true
+    end
     local cfg = zhopa.config
     if not (cfg and cfg.get) then
         return true
@@ -303,6 +307,10 @@ end
 local OFFLEVEL_SKIP_CFG_CACHE_MS = 1000
 
 local function read_offlevel_squad_update_skip_count()
+    local runtime_cfg = zhopa and zhopa.runtime_cfg
+    if runtime_cfg and runtime_cfg.num then
+        return runtime_cfg.num("offlevel_squad_update_skip_count", 0, 0, 10)
+    end
     local cfg = zhopa.config
     if not (cfg and cfg.get) then
         return 0
@@ -329,6 +337,7 @@ end
 
 local PREVALIDATED_CTX = { prevalidated = true }
 local debug_hud_enabled
+local NO_DELTA_SQUAD_TICK_MS = 1000
 
 local function update_memory_snapshot(squad, source)
     if not (squad and zhopa.memory) then
@@ -339,9 +348,9 @@ local function update_memory_snapshot(squad, source)
         return nil
     end
     if zhopa.memory.upsert_snapshot then
-        local ok_upsert, entry = safe_call("memory.upsert_snapshot", zhopa.memory.upsert_snapshot, squad, source or "callback")
+        local ok_upsert, entry, changed = safe_call("memory.upsert_snapshot", zhopa.memory.upsert_snapshot, squad, source or "callback")
         if ok_upsert then
-            return entry
+            return entry, changed == true
         end
     end
     if zhopa.memory.update_squad_snapshot_verified then
@@ -349,7 +358,7 @@ local function update_memory_snapshot(squad, source)
     elseif zhopa.memory.update_squad_snapshot then
         safe_call("memory.update_squad_snapshot", zhopa.memory.update_squad_snapshot, squad)
     end
-    return zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
+    return zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil, true
 end
 
 local function call_module_method(switch_name, module_name, method_name, tag, ...)
@@ -511,6 +520,7 @@ local function route_option_change()
     call_module_method("dynamic_bases", "dynamic_bases", "on_option_change", "dynamic_bases.on_option_change")
     call_module_method("service_filler", "service_filler", "on_option_change", "service_filler.on_option_change")
     call_module_method(nil, "loot", "on_option_change", "loot.on_option_change")
+    call_module_method(nil, "loot_patch", "on_option_change", "loot_patch.on_option_change")
     call_module_method(nil, "fast_trading", "on_option_change", "fast_trading.on_option_change")
     if debug_hud_enabled and debug_hud_enabled() then
         call_module_method("debug_hud", "debug_hud", "on_option_change", "debug_hud.on_option_change")
@@ -611,15 +621,21 @@ local function route_trade_service_result(squad_id, npc_id, smart_name, source, 
     call_module_method(nil, "trade", "on_trade_service_result", "trade.on_trade_service_result", squad_id, npc_id, smart_name, source, phase, status, reason)
 end
 
-function debug_hud_enabled()
+local function read_debug_hud_enabled()
     if runtime_enabled_now() ~= true then
         return false
     end
+    local runtime_cfg = zhopa and zhopa.runtime_cfg
+    if runtime_cfg and runtime_cfg.get then
+        return runtime_cfg.get("debug_hud_enabled", false) == true
+    end
     if not (zhopa.config and zhopa.config.get) then return false end
-    local ok, enabled = safe_call("zhopa.config.get(debug_hud_enabled)", zhopa.config.get, "debug_hud_enabled", false)
+    local ok, enabled = safe_call("zhopa.config.get(debug_hud)", zhopa.config.get, "debug_hud_enabled", false)
     if ok then return enabled == true end
     return false
 end
+
+debug_hud_enabled = read_debug_hud_enabled
 
 local function apply_runtime_fixes()
     if smart_terrain and smart_terrain.smart_terrain and smart_terrain.smart_terrain.smart_terrain_squad_count then
@@ -643,12 +659,20 @@ function Core:__init()
     self.offlevel_skip_counter_by_sid = {}
     self.offlevel_skip_cfg_value = 0
     self.offlevel_skip_cfg_next_tg = 0
+    self.squad_tick_next_tg_by_sid = {}
     self.master_enabled_prev = nil
 end
 
 function Core:_reset_offlevel_skip_counters()
     self.offlevel_skip_counter_by_sid = {}
     self.offlevel_skip_cfg_next_tg = 0
+    self.squad_tick_next_tg_by_sid = {}
+end
+
+function Core:_refresh_runtime_cfg(reason)
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.refresh then
+        safe_call("zhopa.runtime_cfg.refresh", zhopa.runtime_cfg.refresh, reason or "core")
+    end
 end
 
 function Core:_get_offlevel_squad_update_skip_count()
@@ -663,14 +687,16 @@ function Core:_get_offlevel_squad_update_skip_count()
 end
 
 function Core:_forget_offlevel_skip_counter(squad_id)
-    if not self.offlevel_skip_counter_by_sid then
-        return
-    end
     local sid = tonumber(squad_id) or nil
     if not sid then
         return
     end
-    self.offlevel_skip_counter_by_sid[sid] = nil
+    if self.offlevel_skip_counter_by_sid then
+        self.offlevel_skip_counter_by_sid[sid] = nil
+    end
+    if self.squad_tick_next_tg_by_sid then
+        self.squad_tick_next_tg_by_sid[sid] = nil
+    end
 end
 
 function Core:_should_skip_offlevel_squad_update(squad)
@@ -708,20 +734,72 @@ function Core:_should_skip_offlevel_squad_update(squad)
     return false
 end
 
+function Core:_refresh_master_enabled(reason)
+    self:_refresh_runtime_cfg(reason or "enabled")
+    self.master_enabled_prev = master_enabled_now() == true
+    return self.master_enabled_prev == true
+end
+
 function Core:_sync_log_level()
-    if can_run("config") and zhopa.config and zhopa.config.get and zhopa.log and zhopa.log.set_level then
+    if not (can_run("config") and zhopa.log and zhopa.log.set_level) then
+        return
+    end
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        zhopa.log.set_level(zhopa.runtime_cfg.num("log_level", zhopa.log.LEVEL_OFF, zhopa.log.LEVEL_OFF, 5))
+    elseif zhopa.config and zhopa.config.get then
         local ok_lvl, lvl = safe_call("zhopa.config.get(log_level)", zhopa.config.get, "log_level", zhopa.log.LEVEL_OFF)
-        if ok_lvl and tonumber(lvl) then
-            zhopa.log.set_level(tonumber(lvl))
-        end
+        if ok_lvl and tonumber(lvl) then zhopa.log.set_level(tonumber(lvl)) end
     end
 end
 
 function Core:_is_enabled()
     if self.master_enabled_prev == nil then
-        self.master_enabled_prev = master_enabled_now() == true
+        return self:_refresh_master_enabled("lazy_enabled")
     end
     return self.master_enabled_prev == true
+end
+
+function Core:_should_run_no_delta_squad_tick(squad, entry)
+    local sid = tonumber(squad and squad.id) or tonumber(entry and entry.squad_id) or nil
+    if not sid then
+        return false
+    end
+
+    local current = entry and entry.tasks and entry.tasks.current or nil
+    if type(current) ~= "table" then
+        return true
+    end
+
+    local dirty = entry and entry.dirty or nil
+    if type(dirty) == "table"
+        and (dirty.task == true
+            or dirty.smart == true
+            or dirty.level == true
+            or dirty.community == true
+            or dirty.identity == true)
+    then
+        return true
+    end
+
+    local params = type(current.params) == "table" and current.params or nil
+    if params
+        and (params.fast_trade_trigger == true
+            or params.online_force_rebuild == true
+            or params.target_sync_due == true
+            or params.trade_done_state ~= nil)
+    then
+        return true
+    end
+
+    local now = (time_global and time_global()) or 0
+    local next_by_sid = self.squad_tick_next_tg_by_sid or {}
+    self.squad_tick_next_tg_by_sid = next_by_sid
+    local next_tg = tonumber(next_by_sid[sid]) or 0
+    if now < next_tg then
+        return false
+    end
+    next_by_sid[sid] = now + NO_DELTA_SQUAD_TICK_MS
+    return true
 end
 
 function Core:_bootstrap_enabled_runtime(source)
@@ -799,10 +877,8 @@ function Core:_on_first_update()
     if not can_run("core") then return end
 
     self:_reset_offlevel_skip_counters()
+    local enabled = self:_refresh_master_enabled("first_update")
     self:_sync_log_level()
-
-    local enabled = self:_is_enabled()
-    self.master_enabled_prev = enabled
 
     if zhopa.log and zhopa.log.info then
         zhopa.log.info("CORE", "ZHOPA %s started enabled=%s", tostring(zhopa.version), tostring(enabled))
@@ -821,11 +897,10 @@ function Core:_on_option_change()
         safe_call("zhopa.config.clear_mcm_cache", zhopa.config.clear_mcm_cache)
     end
     self:_reset_offlevel_skip_counters()
-    self:_sync_log_level()
 
     local prev_enabled = self.master_enabled_prev == true
-    local enabled = self:_is_enabled()
-    self.master_enabled_prev = enabled
+    local enabled = self:_refresh_master_enabled("option_change")
+    self:_sync_log_level()
 
     if enabled == true and prev_enabled ~= true then
         self:_bootstrap_enabled_runtime("option_enable")
@@ -860,8 +935,8 @@ end
 
 function Core:_load_state(m_data)
     self:_reset_offlevel_skip_counters()
+    self.master_enabled_prev = self:_refresh_master_enabled("load_state")
     self:_sync_log_level()
-    self.master_enabled_prev = self:_is_enabled()
     if can_run("memory") and zhopa.memory and zhopa.memory.load_state then
         safe_call("zhopa.memory.load_state", zhopa.memory.load_state, m_data)
     end
@@ -907,9 +982,10 @@ function Core:_on_squad_update(squad)
         return
     end
     local entry = nil
+    local changed = false
     if can_run("memory") then
-        entry = update_memory_snapshot(squad, "squad_on_update")
-        if not self:_should_skip_offlevel_squad_update(squad) then
+        entry, changed = update_memory_snapshot(squad, "squad_on_update")
+        if not self:_should_skip_offlevel_squad_update(squad) and (changed == true or self:_should_run_no_delta_squad_tick(squad, entry)) then
             dispatch_direct_squad_fsm(squad, "squad_on_update", entry)
         end
     end
@@ -2548,6 +2624,130 @@ inst.get_mcm_path = function(key) return inst:_get_mcm_path(key) end
 zhopa.config = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_config
+
+-- BEGIN module zhopa_runtime_cfg
+zhopa_bundle_module = function()
+zhopa = zhopa or {}
+zhopa.runtime_cfg = zhopa.runtime_cfg or {}
+
+local M = zhopa.runtime_cfg
+
+local type = _G.type
+local tonumber = _G.tonumber
+local tostring = _G.tostring
+local pcall = _G.pcall
+
+local DEFAULTS = {
+    enabled = true,
+    debug_hud_enabled = false,
+    log_level = 0,
+    offlevel_squad_update_skip_count = 0,
+    surge_check_cache_ms = 250,
+    smart_enemy_cache_ttl_ms = 1000,
+
+    explore_enabled = true,
+    artefact_enabled = true,
+    populate_enabled = true,
+    base_camping_enabled = true,
+    patrol_enabled = true,
+    night_rest_enabled = true,
+    trade_enabled = true,
+    trade_max_squads_per_smart = 3,
+    trade_travel_timeout_ms = 600000,
+
+    smart_tasks_enabled = true,
+    smart_tasks_control_enabled = true,
+    smart_tasks_control_max_squads_per_faction = 1,
+
+    mutant_sim_enabled = true,
+    mutant_explore_enabled = true,
+    mutant_hunt_enabled = true,
+    mutant_patrol_enabled = true,
+    mutant_rest_duration_game_hours = 0.25,
+    mutant_patrol_duration_game_hours = 1.0,
+
+    rest_duration_game_hours = 0.25,
+    rest_fallback_stay_min_sec = 900,
+    rest_fallback_stay_max_sec = 1800,
+    base_camping_duration_game_hours = 1,
+    task_arrive_dist_cap_m = 5,
+    target_sync_enabled = true,
+    online_intent_enforce_enabled = true,
+
+    loot_items_enabled = true,
+    loot_items_detect_dist_m = 35,
+    loot_scan_radius_m = 35,
+    loot_corpse_detect_dist_m = 35,
+    loot_patch_max_memory_size = 48,
+}
+
+local function normalize_bool(value, default)
+    if value == true or value == false then
+        return value
+    end
+    local n = tonumber(value)
+    if n ~= nil then
+        return n ~= 0
+    end
+    if type(value) == "string" then
+        if value == "true" then return true end
+        if value == "false" then return false end
+    end
+    return default == true
+end
+
+local function read_config_value(key, default)
+    if not (zhopa.config and zhopa.config.get) then
+        return default
+    end
+    local ok, value = pcall(zhopa.config.get, key, default)
+    if ok then
+        return value
+    end
+    return default
+end
+
+function M.refresh(reason)
+    local values = {}
+    for key, default in pairs(DEFAULTS) do
+        values[key] = read_config_value(key, default)
+    end
+    M.values = values
+    M.reason = tostring(reason or "-")
+    M.version = (tonumber(M.version) or 0) + 1
+    return values
+end
+
+function M.get(key, default)
+    if type(M.values) ~= "table" then
+        M.refresh("lazy")
+    end
+    local value = M.values and M.values[key]
+    if value == nil then
+        return default
+    end
+    return value
+end
+
+function M.bool(key, default)
+    return normalize_bool(M.get(key, default), default)
+end
+
+function M.num(key, default, min_v, max_v)
+    local value = tonumber(M.get(key, default)) or tonumber(default) or 0
+    if min_v ~= nil and value < min_v then
+        value = min_v
+    end
+    if max_v ~= nil and value > max_v then
+        value = max_v
+    end
+    return value
+end
+
+M.refresh("load")
+zhopa.runtime_cfg = M
+end; zhopa_bundle_module(); zhopa_bundle_module = nil
+-- END module zhopa_runtime_cfg
 
 -- BEGIN module zhopa_board_index
 zhopa_bundle_module = function()
@@ -5197,7 +5397,6 @@ local function compact_entry(entry)
     set_if("squad_id", tonumber(entry.squad_id), nil)
     set_if("npc_kind", entry.npc_kind, nil)
     set_if("allowed", entry.allowed, nil)
-    set_if("home_level", entry.home_level, nil)
     set_if("surge_lock", entry.surge_lock == true and true or nil, nil)
 
     if type(entry.tasks) == "table" then
@@ -5703,7 +5902,6 @@ function Memory:_ensure_entry_defaults(e, id)
     e.level_verified_tg = tonumber(e.level_verified_tg) or 0
     e.section_verified_tg = tonumber(e.section_verified_tg) or 0
     e.identity_refresh_next_tg = tonumber(e.identity_refresh_next_tg) or 0
-    e.home_level = type(e.home_level) == "string" and e.home_level or nil
     e.npc_kind = (e.npc_kind == "mutant" or e.npc_kind == "stalker") and e.npc_kind or nil
     e.identity_source = type(e.identity_source) == "string" and e.identity_source or nil
     e.integrity_soft_fail_count = tonumber(e.integrity_soft_fail_count) or 0
@@ -5806,6 +6004,14 @@ function Memory:_apply_squad_snapshot(squad, id, source)
     if not e then return end
     e.integrity_soft_fail_count = 0
     e.integrity_soft_fail_window_tg = 0
+    local prev_dirty = e.dirty
+    local meaningful_changed = type(prev_dirty) == "table"
+        and (prev_dirty.task == true
+            or prev_dirty.smart == true
+            or prev_dirty.level == true
+            or prev_dirty.community == true
+            or prev_dirty.identity == true)
+        or false
 
     local prev_level = e.level
     local prev_level_gvid = tonumber(e.level_gvid) or nil
@@ -5821,6 +6027,7 @@ function Memory:_apply_squad_snapshot(squad, id, source)
     e.current_action = squad.current_action
     e.assigned_target_id = squad.assigned_target_id
     if tonumber(e.smart_id) ~= prev_smart then
+        meaningful_changed = true
         e.dirty.smart = true
         e.dirty.task = true
     end
@@ -5829,6 +6036,7 @@ function Memory:_apply_squad_snapshot(squad, id, source)
 
     local gvid_changed = gvid ~= prev_gvid
     if gvid_changed then
+        meaningful_changed = true
         e.dirty.level = true
         e.dirty.identity = true
         e.dirty.task = true
@@ -5847,7 +6055,7 @@ function Memory:_apply_squad_snapshot(squad, id, source)
     end
 
     if not need_identity_refresh then
-        return
+        return e, meaningful_changed == true
     end
 
     local commander_id = read_commander_id(squad)
@@ -5865,14 +6073,12 @@ function Memory:_apply_squad_snapshot(squad, id, source)
             e.level = level_name
             e.level_gvid = gvid
             e.level_verified_tg = now
-            if e.home_level == nil and zhopa.config and zhopa.config.get and zhopa.config.get("home_region_attachment_enabled", true) ~= false then
-                e.home_level = level_name
-            end
         else
             e.dirty.level = true
         end
     end
     if e.level ~= prev_level or ((tonumber(e.level_gvid) or nil) ~= prev_level_gvid) then
+        meaningful_changed = true
         e.dirty.level = true
         e.dirty.task = true
     end
@@ -5892,6 +6098,7 @@ function Memory:_apply_squad_snapshot(squad, id, source)
         e.community_verified_tg = now
     end
     if e.community ~= prev_comm then
+        meaningful_changed = true
         e.dirty.community = true
         e.dirty.task = true
     end
@@ -5908,12 +6115,15 @@ function Memory:_apply_squad_snapshot(squad, id, source)
         end
     end
     if e.npc_kind ~= prev_kind then
+        meaningful_changed = true
         e.dirty.task = true
     end
     if e.section ~= prev_section then
+        meaningful_changed = true
         e.dirty.task = true
     end
     if e.allowed ~= prev_allowed then
+        meaningful_changed = true
         e.dirty.task = true
     end
 
@@ -5927,9 +6137,11 @@ function Memory:_apply_squad_snapshot(squad, id, source)
             or e.npc_kind ~= prev_kind
             or gvid_changed)
     then
+        meaningful_changed = true
         e.dirty.task = true
     end
     self:_reindex_entry(e)
+    return e, meaningful_changed == true
 end
 
 function Memory:_update_squad_snapshot(squad)
@@ -5979,8 +6191,8 @@ function Memory:_upsert_snapshot(squad, source)
         self:_purge_squad_entry(sid, "not_managed", src)
         return nil
     end
-    self:_apply_squad_snapshot(squad, sid, src)
-    return self:_get_squad_entry(sid)
+    local entry, changed = self:_apply_squad_snapshot(squad, sid, src)
+    return entry or self:_get_squad_entry(sid), changed == true
 end
 
 function Memory:_set_task_current(squad_id, task)
@@ -9235,6 +9447,9 @@ local RUNTIME = {
     claims_by_smart_identity = {},
     claim_by_sid = {},
     dirty_smarts = {},
+    dirty_queue = {},
+    dirty_queue_head = 1,
+    dirty_queue_tail = 0,
     reserved_squads = {},
     surge_cache_active = false,
     surge_cache_next_tg = 0,
@@ -10378,7 +10593,19 @@ local function mark_smart_dirty(smart_name)
     if not smart_name then
         return
     end
+    if RUNTIME.dirty_smarts[smart_name] ~= true then
+        local tail = (tonumber(RUNTIME.dirty_queue_tail) or 0) + 1
+        RUNTIME.dirty_queue_tail = tail
+        RUNTIME.dirty_queue[tail] = smart_name
+    end
     RUNTIME.dirty_smarts[smart_name] = true
+end
+
+local function reset_dirty_queue()
+    RUNTIME.dirty_smarts = {}
+    RUNTIME.dirty_queue = {}
+    RUNTIME.dirty_queue_head = 1
+    RUNTIME.dirty_queue_tail = 0
 end
 
 local function remove_runtime_claim(sid)
@@ -11021,13 +11248,32 @@ local function try_fill_control_smart_jobs_once(smart_name, smart)
     return filled
 end
 
-local function dirty_smart_names()
-    local out = {}
-    for smart_name in pairs(RUNTIME.dirty_smarts) do
-        out[#out + 1] = smart_name
+local function pop_dirty_smart()
+    local queue = RUNTIME.dirty_queue
+    local head = tonumber(RUNTIME.dirty_queue_head) or 1
+    local tail = tonumber(RUNTIME.dirty_queue_tail) or 0
+    while head <= tail do
+        local smart_name = queue[head]
+        queue[head] = nil
+        head = head + 1
+        if type(smart_name) == "string" and RUNTIME.dirty_smarts[smart_name] == true then
+            RUNTIME.dirty_queue_head = head
+            if head > 128 and head > (tail / 2) then
+                local compacted = {}
+                for i = head, tail do
+                    compacted[#compacted + 1] = queue[i]
+                end
+                RUNTIME.dirty_queue = compacted
+                RUNTIME.dirty_queue_head = 1
+                RUNTIME.dirty_queue_tail = #compacted
+            end
+            return smart_name
+        end
     end
-    table_sort(out)
-    return out
+    RUNTIME.dirty_queue = {}
+    RUNTIME.dirty_queue_head = 1
+    RUNTIME.dirty_queue_tail = 0
+    return nil
 end
 
 local function process_dirty_smarts(limit, preferred_smarts)
@@ -11059,14 +11305,12 @@ local function process_dirty_smarts(limit, preferred_smarts)
         end
     end
 
-    if limit == nil or processed < limit then
-        local names = dirty_smart_names()
-        for i = 1, #names do
-            if limit ~= nil and processed >= limit then
-                break
-            end
-            run_one(names[i])
+    while limit == nil or processed < limit do
+        local smart_name = pop_dirty_smart()
+        if not smart_name then
+            break
         end
+        run_one(smart_name)
     end
 
     RUNTIME.processing_dirty = false
@@ -11113,6 +11357,7 @@ end
 
 local function reactivate_runtime(reason)
     rebuild_runtime_claims_from_memory()
+    reset_dirty_queue()
     mark_all_known_smarts_dirty()
     RUNTIME.bootstrapped = true
     process_dirty_smarts(nil)
@@ -13823,12 +14068,24 @@ function tasks._prepare_reactive_context(se_squad, entry, now, mode)
 
     local search_bundle = tasks._get_level_search_bundle(cur_level, community, section_name, now)
 
-    local trade_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("trade_enabled", false) ~= false
-    local artefact_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("artefact_enabled", true) ~= false
-    local explore_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("explore_enabled", true) ~= false
-    local populate_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("populate_enabled", true) ~= false
-    local base_camping_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("base_camping_enabled", true) ~= false
-    local patrol_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("patrol_enabled", true) ~= false
+    local runtime_cfg = zhopa.runtime_cfg
+    local runtime_get = runtime_cfg and runtime_cfg.get or nil
+    local config_get = (not runtime_get) and zhopa.config and zhopa.config.get or nil
+    local function cfg_bool_snapshot(key, default)
+        if runtime_get then
+            return runtime_get(key, default) ~= false
+        end
+        if config_get then
+            return config_get(key, default) ~= false
+        end
+        return default ~= false
+    end
+    local trade_enabled = cfg_bool_snapshot("trade_enabled", true)
+    local artefact_enabled = cfg_bool_snapshot("artefact_enabled", true)
+    local explore_enabled = cfg_bool_snapshot("explore_enabled", true)
+    local populate_enabled = cfg_bool_snapshot("populate_enabled", true)
+    local base_camping_enabled = cfg_bool_snapshot("base_camping_enabled", true)
+    local patrol_enabled = cfg_bool_snapshot("patrol_enabled", true)
 
     local ctx = {
         _cache_tg = now,
@@ -14153,10 +14410,11 @@ local function smart_has_enemy_for_faction(sm, community, smart_name)
     local math_min = (_G.math and _G.math.min) or math.min
     local time_global = _G.time_global
     local now = (time_global and time_global()) or 0
-    local config_get = zhopa.config and zhopa.config.get or nil
     local cache_ttl = 1000
-    if config_get then
-        local v = config_get("smart_enemy_cache_ttl_ms", cache_ttl)
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        cache_ttl = zhopa.runtime_cfg.num("smart_enemy_cache_ttl_ms", cache_ttl, 1, 120000)
+    elseif zhopa.config and zhopa.config.get then
+        local v = zhopa.config.get("smart_enemy_cache_ttl_ms", cache_ttl)
         local n = tonumber(v)
         if n and n > 0 then
             cache_ttl = n
@@ -17641,6 +17899,9 @@ local function is_predator_phase_inactive(predator_phase, night_now)
 end
 
 local function is_hunt_enabled()
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get("mutant_hunt_enabled", true) ~= false
+    end
     if zhopa.config and zhopa.config.get then
         return zhopa.config.get("mutant_hunt_enabled", true) ~= false
     end
@@ -18191,6 +18452,7 @@ function Mutants:__init()
         last_update_tg = 0,
         hunt_presence_by_level = {},
         hunt_presence_by_sid = {},
+        presence_signature_by_sid = {},
         hunt_cache_tg = 0,
         hunt_level_smarts_cache = {},
         hunt_level_smarts_rev = {},
@@ -18624,7 +18886,35 @@ function Mutants:_apply_hunt_presence_marks(sid, marks)
 end
 
 function Mutants:_clear_hunt_presence_for_sid(sid)
+    sid = tonumber(sid) or nil
+    if sid and self.RUNTIME and self.RUNTIME.presence_signature_by_sid then
+        self.RUNTIME.presence_signature_by_sid[sid] = nil
+    end
     self:_apply_hunt_presence_marks(sid, nil)
+end
+
+function Mutants:_hunt_presence_signature(entry, se_squad)
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    local pos_sig = "-"
+    local pos = zhopa.safe and zhopa.safe.safe_position and se_squad and zhopa.safe.safe_position(se_squad) or nil
+    if pos then
+        local x = tonumber(pos.x) or 0
+        local z = tonumber(pos.z) or 0
+        pos_sig = tostring(math_floor(x / 25)) .. ":" .. tostring(math_floor(z / 25))
+    end
+
+    return tostring(entry.npc_kind or "-")
+        .. "|" .. tostring(entry.level or "-")
+        .. "|" .. tostring(entry.level_gvid or "-")
+        .. "|" .. tostring(entry.m_game_vertex_id or "-")
+        .. "|" .. tostring(entry.smart_id or "-")
+        .. "|" .. tostring(entry.scripted_target or "-")
+        .. "|" .. tostring(entry.current_action or "-")
+        .. "|" .. tostring(entry.assigned_target_id or "-")
+        .. "|" .. pos_sig
 end
 
 function Mutants:_is_stalker_presence_entry(entry)
@@ -19278,6 +19568,19 @@ function Mutants:_refresh_presence_for_live_squad(se_squad, source, entry)
     entry.current_action = se_squad.current_action
     entry.assigned_target_id = se_squad.assigned_target_id
 
+    if is_hunt_enabled() ~= true then
+        self:_clear_hunt_presence_for_sid(sid)
+        return entry
+    end
+
+    local sig = self:_hunt_presence_signature(entry, se_squad)
+    local sig_by_sid = self.RUNTIME.presence_signature_by_sid or {}
+    self.RUNTIME.presence_signature_by_sid = sig_by_sid
+    if sig and sig_by_sid[sid] == sig then
+        return entry
+    end
+    sig_by_sid[sid] = sig
+
     if self:_is_stalker_presence_entry(entry) then
         self:_process_stalker_presence(sid, entry)
     else
@@ -19307,7 +19610,10 @@ function Mutants:_update_squad_tasks(se_squad, ctx)
     end
     if not se_squad then return end
     clear_always_arrived(se_squad)
-    if zhopa.config and zhopa.config.get and zhopa.config.get("mutant_sim_enabled", true) == false then
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get and zhopa.runtime_cfg.get("mutant_sim_enabled", true) == false then
+        return
+    end
+    if not (zhopa.runtime_cfg and zhopa.runtime_cfg.get) and zhopa.config and zhopa.config.get and zhopa.config.get("mutant_sim_enabled", true) == false then
         return
     end
 
@@ -19458,6 +19764,7 @@ end
 function Mutants:_reset_presence_runtime()
     self.RUNTIME.hunt_presence_by_level = {}
     self.RUNTIME.hunt_presence_by_sid = {}
+    self.RUNTIME.presence_signature_by_sid = {}
     self.RUNTIME.hunt_cache_tg = 0
     self.RUNTIME.hunt_level_smarts_cache = {}
     self.RUNTIME.hunt_level_smarts_rev = {}
@@ -25503,11 +25810,14 @@ local LootPatch = {
         corpse_loot_call_patched = false,
         corpse_loot_call_orig = nil,
         next_retry_tg = 0,
+        loot_patch_cfg_snapshot = nil,
+        loot_patch_cfg_next_tg = 0,
     }
 }
 
 local EVENT_SCAN_COOLDOWN_MS = 250
 local PATCH_RETRY_COOLDOWN_MS = 1000
+local LOOT_PATCH_CFG_SNAPSHOT_MS = 1000
 
 local function cfg(key, def)
     if not (zhopa.config and zhopa.config.get) then return def end
@@ -25526,6 +25836,28 @@ end
 
 local function tg()
     return (time_global and time_global()) or 0
+end
+
+local function get_loot_patch_cfg()
+    local now = tg()
+    local snapshot = LootPatch.RUNTIME.loot_patch_cfg_snapshot
+    if type(snapshot) == "table" and now < (tonumber(LootPatch.RUNTIME.loot_patch_cfg_next_tg) or 0) then
+        return snapshot
+    end
+
+    local item_detect_m = cfg_num("loot_items_detect_dist_m", 35, 0)
+    local scan_m = cfg_num("loot_scan_radius_m", 35, 0)
+    local corpse_m = cfg_num("loot_corpse_detect_dist_m", 35, 0)
+    snapshot = {
+        loot_items_enabled = cfg("loot_items_enabled", false) == true,
+        max_memory = cfg_num("loot_patch_max_memory_size", 48, 8),
+        item_detect_sqr = item_detect_m * item_detect_m,
+        scan_sqr = scan_m * scan_m,
+        corpse_sqr = corpse_m * corpse_m,
+    }
+    LootPatch.RUNTIME.loot_patch_cfg_snapshot = snapshot
+    LootPatch.RUNTIME.loot_patch_cfg_next_tg = now + LOOT_PATCH_CFG_SNAPSHOT_MS
+    return snapshot
 end
 
 local function log_debug(fmt, ...)
@@ -25701,7 +26033,8 @@ local function patch_xr_gather_items()
             return true
         end
 
-        if cfg("loot_items_enabled", false) ~= true then
+        local patch_cfg = get_loot_patch_cfg()
+        if patch_cfg.loot_items_enabled ~= true then
             return false
         end
 
@@ -25752,7 +26085,7 @@ local function patch_xr_gather_items()
         end
 
         local npc = self.object
-        local max_memory = cfg_num("loot_patch_max_memory_size", 48, 8)
+        local max_memory = tonumber(patch_cfg.max_memory) or 48
         local size = #self.st.memory
         if size > max_memory then
             for i = size, max_memory + 1, -1 do
@@ -25762,9 +26095,7 @@ local function patch_xr_gather_items()
         end
 
         local corpse_hint = false
-        local corpse_md = tonumber(cfg("loot_corpse_detect_dist_m", 35)) or 35
-        if corpse_md < 0 then corpse_md = 0 end
-        local corpse_sqr = corpse_md * corpse_md
+        local corpse_sqr = tonumber(patch_cfg.corpse_sqr) or 0
         local corpse_ids = loot.get_corpse_event_ids and loot.get_corpse_event_ids() or nil
         local corpse_pool_n = corpse_ids and #corpse_ids or 0
         if corpse_pool_n > 0 and corpse_sqr > 0 then
@@ -25783,25 +26114,30 @@ local function patch_xr_gather_items()
         if size == 0 then
             self.st.cstackprevent = true
 
-            local md = tonumber(cfg("loot_items_detect_dist_m", 35)) or 35
-            if md < 0 then md = 0 end
-            local max_item_dist_sqr = md * md
+            local max_item_dist_sqr = tonumber(patch_cfg.item_detect_sqr) or 0
 
             local max_items = max_memory - #self.st.memory
             if max_items < 0 then max_items = 0 end
             local added = 0
 
-            local scan_md = tonumber(cfg("loot_scan_radius_m", 35)) or 35
-            if scan_md < 0 then scan_md = 0 end
-            local scan_sqr = scan_md * scan_md
+            local scan_sqr = tonumber(patch_cfg.scan_sqr) or 0
             local item_ids = loot.get_item_event_ids and loot.get_item_event_ids() or nil
             local item_pool_n = item_ids and #item_ids or 0
             if item_pool_n > 0 and max_items > 0 then
-                for idx = item_pool_n, 1, -1 do
+                local scan_budget = math.max(32, max_items * 8)
+                if scan_budget > item_pool_n then
+                    scan_budget = item_pool_n
+                end
+                local idx = tonumber(self.st.__zhopa_item_pool_cursor) or item_pool_n
+                for _ = 1, scan_budget do
                     if added >= max_items then
                         break
                     end
+                    if idx < 1 then
+                        idx = item_pool_n
+                    end
                     local id = item_ids[idx]
+                    idx = idx - 1
                     local se_itm = id and alife_object and alife_object(id) or nil
                     if se_itm and se_itm.parent_id == 65535 then
                         local itm = level.object_by_id(id)
@@ -25818,6 +26154,7 @@ local function patch_xr_gather_items()
                         end
                     end
                 end
+                self.st.__zhopa_item_pool_cursor = idx
             end
 
             self.st.cstackprevent = nil
@@ -25921,9 +26258,7 @@ local function patch_xr_gather_items()
         local itm_pos = itm:position()
         local dist = npc:position():distance_to_sqr(itm_pos)
 
-        local md = tonumber(cfg("loot_items_detect_dist_m", 35)) or 35
-        if md < 0 then md = 0 end
-        local max_item_dist_sqr = md * md
+        local max_item_dist_sqr = tonumber(patch_cfg.item_detect_sqr) or 0
         local max_detect_sqr = uv.MaxDetectDistance or max_item_dist_sqr
         if max_item_dist_sqr > 0 then
             max_detect_sqr = math.min(max_detect_sqr, max_item_dist_sqr)
@@ -26004,6 +26339,14 @@ function LootPatch.on_actor_first_update()
 end
 
 function LootPatch.on_load_state()
+    LootPatch.RUNTIME.loot_patch_cfg_snapshot = nil
+    LootPatch.RUNTIME.loot_patch_cfg_next_tg = 0
+    return maybe_retry_apply()
+end
+
+function LootPatch.on_option_change()
+    LootPatch.RUNTIME.loot_patch_cfg_snapshot = nil
+    LootPatch.RUNTIME.loot_patch_cfg_next_tg = 0
     return maybe_retry_apply()
 end
 
@@ -27047,6 +27390,7 @@ local inst = zhopa.smart_service_slot_doctor
 
 local SCAN_COOLDOWN_MS = 250
 local ACTION_COOLDOWN_MS = 2000
+local NO_SERVICE_SCAN_COOLDOWN_MS = 60000
 local POST_COMPLETE_EXIT_VERIFY_MS = 3000
 local POST_COMPLETE_TRADE_TO_TECH_VERIFY_MS = 10000
 local POST_TECH_UNKNOWN_GRACE_MS = 10000
@@ -27124,6 +27468,7 @@ local arm_post_tech_watch
 local RUNTIME = {
     ready = false,
     smart_next_scan_tg = {},
+    non_service_next_scan_tg = {},
     smart_diag_next_tg = {},
     smart_skip_diag_next_tg = {},
     smart_rule_cache = {},
@@ -27141,6 +27486,7 @@ end
 
 local function reset_runtime()
     RUNTIME.smart_next_scan_tg = {}
+    RUNTIME.non_service_next_scan_tg = {}
     RUNTIME.smart_diag_next_tg = {}
     RUNTIME.smart_skip_diag_next_tg = {}
     RUNTIME.smart_rule_cache = {}
@@ -27577,6 +27923,7 @@ local function clear_runtime_state_for_smart(smart_id)
         return
     end
     RUNTIME.smart_next_scan_tg[smart_id] = nil
+    RUNTIME.non_service_next_scan_tg[smart_id] = nil
     RUNTIME.smart_rule_cache[smart_id] = nil
     for npc_id, state in pairs(RUNTIME.by_npc) do
         if state.smart_id == smart_id then
@@ -28482,6 +28829,16 @@ local function process_smart(smart)
     end
 
     local tg = now()
+    if tg < (tonumber(RUNTIME.non_service_next_scan_tg[smart_id]) or 0) then
+        return
+    end
+    local rule_cache = get_rule_cache_for_smart(smart)
+    if not (rule_cache and rule_cache.has_service_slots == true) then
+        RUNTIME.non_service_next_scan_tg[smart_id] = tg + NO_SERVICE_SCAN_COOLDOWN_MS
+        log_smart_skip(smart, "no_service_slots")
+        return
+    end
+
     if tg < (tonumber(RUNTIME.smart_next_scan_tg[smart_id]) or 0) then
         return
     end

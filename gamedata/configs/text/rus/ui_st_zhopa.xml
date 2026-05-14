@@ -116,13 +116,6 @@
     <string id="ui_mcm_zhopa_explore_enabled_desc">
         <text>Разрешает отрядам переходить между соседними уровнями.</text>
     </string>
-
-    <string id="ui_mcm_zhopa_home_region_attachment_enabled">
-        <text>Отряды: запоминать домашнюю локацию</text>
-    </string>
-    <string id="ui_mcm_zhopa_home_region_attachment_enabled_desc">
-        <text>Сохраняет в памяти отряда локацию на которой он появился как домашнюю, нужно для улучшения логики некоторых задач, опционально.</text>
-    </string>
     <string id="ui_mcm_zhopa_mutant_sim_enabled">
         <text>Мутанты: участие в симуляции</text>
     </string>
