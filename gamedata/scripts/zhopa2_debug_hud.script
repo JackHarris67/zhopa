@@ -1,0 +1,325 @@
+local DEFAULT_SPOT = "item_kit"
+local MUTANT_SPOT = "circle_zombied"
+
+local faction_spots = {
+	stalker = "warfare_stalker_spot",
+	bandit = "warfare_bandit_spot",
+	csky = "warfare_csky_spot",
+	army = "warfare_army_spot",
+	freedom = "warfare_freedom_spot",
+	duty = "warfare_duty_spot",
+	dolg = "warfare_duty_spot",
+	ecolog = "warfare_ecolog_spot",
+	merc = "warfare_killer_spot",
+	killer = "warfare_killer_spot",
+	monolith = "warfare_monolith_spot",
+	greh = "warfare_greh_spot",
+	renegade = "warfare_renegade_spot",
+	isg = "warfare_isg_spot",
+}
+
+local owned_spots = {}
+local squad_spot_ids = {}
+
+local function enabled()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool("debug_hud_enabled", false) == true
+	end
+	return false
+end
+
+local function is_monster_squad(squad)
+	local p = rawget(_G, "zhopa2_perception")
+	if p and type(p.is_monster_squad) == "function" then
+		return p.is_monster_squad(squad) == true
+	end
+	local player_id = squad and squad.player_id
+	return player_id ~= nil and (
+		player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_predatory_day"
+		or player_id == "monster_predatory_night"
+		or player_id == "monster_vegetarian"
+		or player_id == "monster_zombied"
+		or player_id == "monster_zombied_day"
+		or player_id == "monster_zombied_night"
+		or player_id == "zombied"
+		or (is_squad_monster and is_squad_monster[player_id] == true)
+	)
+end
+
+local function spot_for_squad(squad)
+	if is_monster_squad(squad) then
+		return MUTANT_SPOT
+	end
+	local cfg = rawget(_G, "zhopa2_cfg")
+	local faction = squad.player_id
+	if cfg and type(cfg.get_faction_alias) == "function" then
+		faction = cfg.get_faction_alias(faction)
+	end
+	return faction_spots[faction] or DEFAULT_SPOT
+end
+
+local function forget_spot_owner(id, squad_id)
+	squad_id = tonumber(squad_id)
+	if squad_id then
+		squad_spot_ids[squad_id] = nil
+	end
+
+	id = tonumber(id)
+	if not id then
+		return
+	end
+	for sid, spot_id in pairs(squad_spot_ids) do
+		if spot_id == id then
+			squad_spot_ids[sid] = nil
+		end
+	end
+end
+
+local function remove_spot(id, squad_id)
+	id = tonumber(id)
+	local spot = id and owned_spots[id] or nil
+	local lvl = rawget(_G, "level")
+	if not (id and spot and lvl and lvl.map_remove_object_spot) then
+		forget_spot_owner(id, squad_id)
+		return
+	end
+	local map_remove = lvl.map_remove_object_spot
+	pcall(function() map_remove(id, spot) end)
+	owned_spots[id] = nil
+	forget_spot_owner(id, squad_id)
+end
+
+function cleanup_squad_id(squad_id)
+	squad_id = tonumber(squad_id)
+	if not squad_id then
+		return
+	end
+
+	local id = squad_spot_ids[squad_id]
+	if id then
+		remove_spot(id, squad_id)
+	else
+		squad_spot_ids[squad_id] = nil
+	end
+end
+
+local function smart_name(id)
+	local smart = id and alife_object(id)
+	return smart and smart.name and smart:name() or tostring(id or "-")
+end
+
+local function perception()
+	local p = rawget(_G, "zhopa2_perception")
+	if not p and require then
+		pcall(require, "zhopa2_perception")
+		p = rawget(_G, "zhopa2_perception")
+	end
+	return p
+end
+
+local function elapsed_time(started)
+	local p = perception()
+	if p and type(p.elapsed) == "function" then
+		return p.elapsed(started)
+	end
+	local now = game and game.get_game_time and game.get_game_time() or nil
+	if not (now and started) then
+		return 0
+	end
+	return now:diffSec(started)
+end
+
+local function obj_level(obj)
+	local p = perception()
+	if p and type(p.obj_level) == "function" then
+		return p.obj_level(obj)
+	end
+	return "-"
+end
+
+local function format_time(sec)
+	local total_sec = math.floor(tonumber(sec) or 0)
+	if total_sec < 0 then
+		total_sec = 0
+	end
+	local h = math.floor(total_sec / 3600)
+	local m = math.floor((total_sec % 3600) / 60)
+	local s = total_sec % 60
+	local function pad2(value)
+		local n = math.floor(tonumber(value) or 0)
+		if n < 10 then
+			return "0" .. tostring(n)
+		end
+		return tostring(n)
+	end
+	if h > 0 then
+		return pad2(h) .. ":" .. pad2(m) .. ":" .. pad2(s)
+	end
+	return pad2(m) .. ":" .. pad2(s)
+end
+
+local function route_state(squad)
+	if type(squad.zhopa2_patrol) ~= "string" or squad.zhopa2_patrol == "" then
+		return "-"
+	end
+	local total = 0
+	local parts = str_explode(squad.zhopa2_patrol, ",")
+	for i = 1, #parts do
+		if tonumber(parts[i]) then
+			total = total + 1
+		end
+	end
+	if total <= 0 then
+		return "-"
+	end
+	return strformat("%s/%s", tostring(squad.zhopa2_patrol_idx or 1), tostring(total))
+end
+
+local function task_timer(squad)
+	if squad.zhopa2_task == "NIGHT_REST" then
+		return "until_morning"
+	end
+
+	local duration = tonumber(squad.zhopa2_until) or 0
+	if duration <= 0 then
+		return "none"
+	end
+	local left = duration - elapsed_time(squad.zhopa2_started)
+	return strformat("%s / %s", format_time(left), format_time(duration))
+end
+
+local function base_ownership(squad)
+	local smart_id = squad and (tonumber(squad.zhopa2_target) or squad.smart_id) or nil
+	local smart = smart_id and alife_object(smart_id) or nil
+	local index = rawget(_G, "zhopa2_index")
+	local ownership = index and type(index.base_ownership) == "function" and index.base_ownership(smart) or nil
+	if not ownership then
+		return "-"
+	end
+	if ownership.state == "owned" then
+		return strformat("%s:%s", tostring(ownership.state), tostring(ownership.owner or "-"))
+	end
+	return tostring(ownership.state or "-")
+end
+
+local function base_presence(squad)
+	local smart_id = squad and (tonumber(squad.zhopa2_target) or squad.smart_id) or nil
+	local smart = smart_id and alife_object(smart_id) or nil
+	local index = rawget(_G, "zhopa2_index")
+	local ownership = index and type(index.base_ownership) == "function" and index.base_ownership(smart) or nil
+	if not ownership then
+		return "-"
+	end
+	return strformat("%s:%s", tostring(ownership.presence or "-"), tostring(ownership.zhopa2_count or 0))
+end
+
+local function build_hint(squad)
+	local lines = {
+		"ZHOPA ALIFE 2",
+		strformat("squad: %s", tostring(squad.name and squad:name() or "-")),
+		strformat("id: %s", tostring(squad.id or "-")),
+		strformat("faction: %s", tostring(squad.player_id or "-")),
+		strformat("task: %s", tostring(squad.zhopa2_task or "NO_TASK")),
+		strformat("target: %s", smart_name(squad.zhopa2_target)),
+		strformat("smart: %s", smart_name(squad.smart_id)),
+		strformat("base owner: %s", base_ownership(squad)),
+		strformat("base presence: %s", base_presence(squad)),
+		strformat("level: %s", tostring(obj_level(squad) or "-")),
+		strformat("action: %s", tostring(squad.current_action or "-")),
+		strformat("route: %s", route_state(squad)),
+		strformat("timer: %s", task_timer(squad)),
+		strformat("reason: %s", tostring(squad.zhopa2_last_reason or "-")),
+		strformat("result: %s", tostring(squad.zhopa2_last_result or "-")),
+	}
+	return table.concat(lines, "\\n")
+end
+
+function update_squad(squad)
+	if not squad then
+		return
+	end
+
+	local squad_id = tonumber(squad.id)
+	local id = squad.commander_id and squad:commander_id() or nil
+	if not id then
+		cleanup_squad_id(squad_id)
+		return
+	end
+
+	local old_id = squad_id and squad_spot_ids[squad_id] or nil
+	if old_id and old_id ~= id then
+		remove_spot(old_id, squad_id)
+	end
+
+	if not (enabled() and squad.zhopa2_managed == true and squad.zhopa2_task) then
+		remove_spot(id, squad_id)
+		return
+	end
+	local lvl = rawget(_G, "level")
+	if not (lvl and lvl.map_add_object_spot and lvl.map_has_object_spot) then
+		return
+	end
+	local map_has = lvl.map_has_object_spot
+	local map_add = lvl.map_add_object_spot
+	local map_change = lvl.map_change_spot_hint
+
+	local spot = spot_for_squad(squad)
+	local old = owned_spots[id]
+	if old and old ~= spot then
+		remove_spot(id, squad_id)
+		old = nil
+	end
+
+	local hint = build_hint(squad)
+	local ok_has, has = pcall(function() return map_has(id, spot) end)
+	if ok_has and has ~= 0 then
+		owned_spots[id] = spot
+		if squad_id then
+			squad_spot_ids[squad_id] = id
+		end
+		if map_change then
+			pcall(function() map_change(id, spot, hint) end)
+		end
+		return
+	end
+
+	if old == nil then
+		local ok_add = pcall(function() map_add(id, spot, hint) end)
+		if ok_add then
+			owned_spots[id] = spot
+			if squad_id then
+				squad_spot_ids[squad_id] = id
+			end
+		end
+	end
+end
+
+function cleanup_squad(squad)
+	if not squad then
+		return
+	end
+
+	local squad_id = tonumber(squad.id)
+	cleanup_squad_id(squad_id)
+	if squad.commander_id then
+		remove_spot(squad:commander_id(), squad_id)
+	end
+end
+
+function cleanup_all()
+	for id in pairs(owned_spots) do
+		remove_spot(id)
+	end
+	empty_table(squad_spot_ids)
+end
+
+function actor_on_first_update()
+	cleanup_all()
+end
+
+function on_game_load()
+	cleanup_all()
+end

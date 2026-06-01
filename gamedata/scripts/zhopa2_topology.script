@@ -1,0 +1,214 @@
+local M = {}
+
+local CLSID_LEVEL_CHANGER = clsid and clsid.level_changer or 94
+local CLSID_LEVEL_CHANGER_S = clsid and clsid.level_changer_s or 95
+
+local edges_by_level = {}
+local edges_by_id = {}
+local neighbors_by_level = {}
+local topology_revision = 0
+local utils_stpk_checked = nil
+
+local function level_from_object(obj)
+	if not (obj and obj.m_game_vertex_id) then
+		return nil
+	end
+	local gg = game_graph()
+	if not (gg and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	local sim = alife()
+	if not sim then
+		return nil
+	end
+	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+end
+
+local function append_edge(map, source_level, dest_level)
+	if type(source_level) ~= "string" or source_level == "" then
+		return
+	end
+	if type(dest_level) ~= "string" or dest_level == "" or source_level == dest_level then
+		return
+	end
+
+	local bucket = map[source_level]
+	if type(bucket) ~= "table" then
+		bucket = {}
+		map[source_level] = bucket
+	end
+	bucket[dest_level] = true
+end
+
+local function edge_sets_to_arrays(src)
+	local out = {}
+	for level_name, set in pairs(src or {}) do
+		if type(level_name) == "string" and level_name ~= "" and type(set) == "table" then
+			local arr = {}
+			for other_level, ok in pairs(set) do
+				if ok == true and type(other_level) == "string" and other_level ~= "" then
+					arr[#arr + 1] = other_level
+				end
+			end
+			if table_sort then
+				table_sort(arr)
+			end
+			out[level_name] = arr
+		end
+	end
+	return out
+end
+
+local function rebuild_neighbors()
+	local merged = {}
+	for level_name, set in pairs(edges_by_level) do
+		for other_level, ok in pairs(set or {}) do
+			if ok == true then
+				append_edge(merged, level_name, other_level)
+				append_edge(merged, other_level, level_name)
+			end
+		end
+	end
+	neighbors_by_level = edge_sets_to_arrays(merged)
+	topology_revision = topology_revision + 1
+end
+
+local function get_utils_stpk()
+	if utils_stpk_checked ~= nil then
+		return utils_stpk_checked or nil
+	end
+
+	local mod = rawget(_G, "utils_stpk")
+	if type(mod) ~= "table" and require then
+		pcall(require, "utils_stpk")
+		mod = rawget(_G, "utils_stpk")
+	end
+	utils_stpk_checked = type(mod) == "table" and mod or false
+	return utils_stpk_checked or nil
+end
+
+local function get_level_changer_data(se_obj)
+	local utils = get_utils_stpk()
+	if utils and utils.get_level_changer_data then
+		local ok, data = pcall(utils.get_level_changer_data, se_obj)
+		if ok and type(data) == "table" then
+			return data
+		end
+	end
+	return nil
+end
+
+local function is_level_changer(se_obj, type_name)
+	if type_name == "se_level_changer" or type_name == "level_changer" or type_name == "level_changer_s" then
+		return true
+	end
+	if not (se_obj and se_obj.clsid) then
+		return false
+	end
+
+	local ok, class_id = pcall(function()
+		return se_obj:clsid()
+	end)
+	class_id = ok and tonumber(class_id) or nil
+	return class_id == tonumber(CLSID_LEVEL_CHANGER) or class_id == tonumber(CLSID_LEVEL_CHANGER_S)
+end
+
+local function remove_level_changer(se_obj)
+	local id = nil
+	if type(se_obj) == "number" or type(se_obj) == "string" then
+		id = tonumber(se_obj)
+	elseif se_obj then
+		id = tonumber(se_obj.id)
+	end
+	if not id then
+		return false
+	end
+
+	local prev = edges_by_id[id]
+	edges_by_id[id] = nil
+	if type(prev) ~= "table" then
+		return false
+	end
+
+	local bucket = edges_by_level[prev.source_level]
+	if type(bucket) == "table" then
+		bucket[prev.dest_level] = nil
+		if next(bucket) == nil then
+			edges_by_level[prev.source_level] = nil
+		end
+	end
+	rebuild_neighbors()
+	return true
+end
+
+local function set_level_changer(se_obj)
+	local id = tonumber(se_obj and se_obj.id)
+	if not id then
+		return false
+	end
+
+	local source_level = level_from_object(se_obj)
+	local data = get_level_changer_data(se_obj)
+	local dest_level = type(data) == "table" and data.dest_level_name or nil
+	if type(source_level) ~= "string" or source_level == "" then
+		return false
+	end
+	if type(dest_level) ~= "string" or dest_level == "" or source_level == dest_level then
+		return false
+	end
+
+	remove_level_changer(id)
+	append_edge(edges_by_level, source_level, dest_level)
+	edges_by_id[id] = {
+		source_level = source_level,
+		dest_level = dest_level,
+	}
+	rebuild_neighbors()
+	return true
+end
+
+local function server_entity_on_register(se_obj, type_name)
+	if is_level_changer(se_obj, type_name) then
+		set_level_changer(se_obj)
+	end
+end
+
+local function server_entity_on_unregister(se_obj, type_name)
+	if is_level_changer(se_obj, type_name) then
+		remove_level_changer(se_obj)
+	end
+end
+
+function M.get_level_neighbors(level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return {}
+	end
+	return neighbors_by_level[level_name] or {}
+end
+
+function M.get_revision()
+	return topology_revision
+end
+
+function M.set_level_changer(se_obj)
+	return set_level_changer(se_obj)
+end
+
+function M.remove_level_changer(se_obj)
+	return remove_level_changer(se_obj)
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	RegisterScriptCallback("server_entity_on_register", server_entity_on_register)
+	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_topology = M
+return M

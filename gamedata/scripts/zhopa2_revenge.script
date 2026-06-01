@@ -1,0 +1,686 @@
+local M = {}
+
+local TASK_REVENGE = "REVENGE"
+local TASK_BASE_CAMPING = "BASE_CAMPING"
+local ACTOR_TARGET_ID = AC_ID or 0
+local INVALID_ID = 65535
+
+local function load_module(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function perception_mod()
+	return load_module("zhopa2_perception")
+end
+
+local function index_mod()
+	return load_module("zhopa2_index")
+end
+
+local function tasks_mod()
+	return load_module("zhopa2_tasks")
+end
+
+local function cfg_mod()
+	return load_module("zhopa2_cfg")
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_num) == "function" then
+		return cfg.get_num(key, default)
+	end
+	return default
+end
+
+local function hour_is_night(hour)
+	hour = tonumber(hour) or 12
+	return hour >= 21 or hour <= 5
+end
+
+local function current_hour()
+	return level and level.get_time_hours and level.get_time_hours() or nil
+end
+
+local function is_night_now()
+	local perception = perception_mod()
+	if perception and type(perception.is_night) == "function" then
+		return perception.is_night() == true
+	end
+	return hour_is_night(current_hour())
+end
+
+local function revenge_disabled_for_night()
+	return is_night_now()
+end
+
+local function sleep_touches_night(hours, start_hour)
+	hours = math.floor(tonumber(hours) or 0)
+	local hour = tonumber(start_hour) or current_hour()
+	if not hour then
+		return false
+	end
+	if hours <= 0 then
+		return hour_is_night(hour)
+	end
+	for i = 0, hours do
+		local check_hour = hour + i
+		while check_hour >= 24 do
+			check_hour = check_hour - 24
+		end
+		if hour_is_night(check_hour) then
+			return true
+		end
+	end
+	return false
+end
+
+local function object_id(obj)
+	if type(obj) == "number" then
+		return obj
+	end
+	if type(obj) == "string" then
+		return tonumber(obj)
+	end
+	if not obj then
+		return nil
+	end
+	if type(obj.id) == "function" then
+		local ok, id = pcall(obj.id, obj)
+		return ok and id or nil
+	end
+	return obj.id
+end
+
+local MAX_PROCESSED_DEATHS = 128
+local HOSTILITY_UPDATE_INTERVAL_MS = 1000
+local HOSTILITY_MAX_SQUADS_PER_TICK = 16
+local processed_deaths = {}
+local processed_order = {}
+local last_hostility_update = 0
+local active_actor_revenge_squad_id = nil
+local night_revenge_cancelled = false
+local sleep_hook_installed = false
+local last_sleep_start_hour = nil
+local sleep_paused_actor_revenge_squad_id = nil
+local sleep_paused_actor_revenge_touched_night = false
+
+local function death_key(victim_squad, offender_target_id)
+	if not (victim_squad and victim_squad.id and offender_target_id ~= nil) then
+		return nil
+	end
+	return tostring(victim_squad.id) .. ":" .. tostring(offender_target_id)
+end
+
+local function mark_death_processed(victim_squad, offender_target_id)
+	local key = death_key(victim_squad, offender_target_id)
+	if not key then
+		return true
+	end
+	if processed_deaths[key] then
+		return false
+	end
+	processed_deaths[key] = true
+	processed_order[#processed_order + 1] = key
+	if #processed_order > MAX_PROCESSED_DEATHS then
+		local old_key = table.remove(processed_order, 1)
+		if old_key then
+			processed_deaths[old_key] = nil
+		end
+	end
+	return true
+end
+
+local function squad_npc_count(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return 0
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) or 0
+end
+
+local function squad_commander_id(squad)
+	if not (squad and type(squad.commander_id) == "function") then
+		return nil
+	end
+	local ok, id = pcall(squad.commander_id, squad)
+	return ok and id or nil
+end
+
+local function obj_level(obj)
+	local perception = perception_mod()
+	if perception and type(perception.obj_level) == "function" then
+		local ok, level_name = pcall(perception.obj_level, obj)
+		if ok and level_name then
+			return level_name
+		end
+	end
+	if not (obj and obj.m_game_vertex_id) then
+		return nil
+	end
+	local gg = game_graph()
+	if not (gg and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	if not alife then
+		return nil
+	end
+	local sim = alife()
+	if not sim then
+		return nil
+	end
+	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+end
+
+local function position_distance(a, b)
+	if not (a and b and a.position and b.position) then
+		return nil
+	end
+	if obj_level(a) ~= obj_level(b) then
+		return nil
+	end
+	local ok, dist = pcall(function()
+		return a.position:distance_to(b.position)
+	end)
+	if ok and tonumber(dist) then
+		return tonumber(dist)
+	end
+	local ok_sqr, dist_sqr = pcall(function()
+		return a.position:distance_to_sqr(b.position)
+	end)
+	dist_sqr = ok_sqr and tonumber(dist_sqr) or nil
+	return dist_sqr and math.sqrt(dist_sqr) or nil
+end
+
+local function graph_distance(a, b)
+	if utils_obj and type(utils_obj.graph_distance) == "function" and a and b and a.m_game_vertex_id and b.m_game_vertex_id then
+		local ok, dist = pcall(utils_obj.graph_distance, a.m_game_vertex_id, b.m_game_vertex_id)
+		if ok and tonumber(dist) then
+			return tonumber(dist)
+		end
+	end
+	return nil
+end
+
+local function squad_distance(victim_squad, responder)
+	return position_distance(victim_squad, responder) or graph_distance(victim_squad, responder) or 100000000
+end
+
+local function actor_killer(se_killer)
+	local id = tonumber(object_id(se_killer))
+	if id == ACTOR_TARGET_ID then
+		return true
+	end
+	return db and db.actor and id == db.actor:id()
+end
+
+local function squad_from_member(se_obj)
+	if not se_obj then
+		return nil
+	end
+	if get_object_squad then
+		local ok, squad = pcall(get_object_squad, se_obj, "zhopa2_revenge")
+		if ok and squad then
+			return squad
+		end
+	end
+	if se_obj.group_id and se_obj.group_id ~= INVALID_ID then
+		return alife_object(se_obj.group_id)
+	end
+	local id = object_id(se_obj)
+	if not alife then
+		return nil
+	end
+	local sim = alife()
+	if not sim then
+		return nil
+	end
+	local member = id and sim and sim:object(id) or nil
+	if member and member.group_id and member.group_id ~= INVALID_ID then
+		return sim:object(member.group_id)
+	end
+	return nil
+end
+
+local function killer_squad_and_target(se_killer)
+	if actor_killer(se_killer) then
+		return nil, ACTOR_TARGET_ID
+	end
+	local offender_squad = squad_from_member(se_killer)
+	return offender_squad, offender_squad and offender_squad.id or nil
+end
+
+local function responder_ok(candidate, victim_squad, offender_squad)
+	if not (candidate and victim_squad and candidate.id) then
+		return false
+	end
+	if candidate.id == victim_squad.id then
+		return false
+	end
+	if offender_squad and candidate.id == offender_squad.id then
+		return false
+	end
+	if candidate.zhopa2_task == TASK_REVENGE or candidate.zhopa2_task == TASK_BASE_CAMPING then
+		return false
+	end
+	if candidate.disabled or candidate.player_id ~= victim_squad.player_id then
+		return false
+	end
+	if squad_npc_count(candidate) <= 0 or not squad_commander_id(candidate) then
+		return false
+	end
+	if type(candidate.zhopa2_can_manage) == "function" and not candidate:zhopa2_can_manage() then
+		return false
+	end
+	return true
+end
+
+local function level_pool(victim_squad)
+	local current_level = obj_level(victim_squad)
+	local levels = {}
+	if current_level then
+		levels[current_level] = true
+	end
+
+	local perception = perception_mod()
+	local neighbors = perception and type(perception.nearby_levels) == "function" and perception.nearby_levels(current_level) or {}
+	for level_name in pairs(neighbors.direct or {}) do
+		levels[level_name] = true
+	end
+	return levels
+end
+
+local function consider_candidate(victim_squad, offender_squad, candidate, best, best_dist)
+	if not responder_ok(candidate, victim_squad, offender_squad) then
+		return best, best_dist
+	end
+	local dist = squad_distance(victim_squad, candidate)
+	if not best_dist or dist < best_dist then
+		return candidate, dist
+	end
+	return best, best_dist
+end
+
+local function scan_vanilla_squads(levels, victim_squad, offender_squad)
+	local index = index_mod()
+	if not (index and type(index.squads_on_levels) == "function") then
+		return nil, nil
+	end
+	local candidates = index.squads_on_levels(levels, 64)
+	local best
+	local best_dist
+	for i = 1, #candidates do
+		local candidate = candidates[i]
+		if levels[obj_level(candidate)] then
+			best, best_dist = consider_candidate(victim_squad, offender_squad, candidate, best, best_dist)
+		end
+	end
+	return best, best_dist
+end
+
+local function find_responder(victim_squad, offender_squad)
+	local levels = level_pool(victim_squad)
+	local best = scan_vanilla_squads(levels, victim_squad, offender_squad)
+	return best
+end
+
+local function actor_revenge_roll_passed()
+	local chance = tonumber(cfg_num("revenge_actor_chance", 10)) or 10
+	if chance <= 0 then
+		return false
+	end
+	if chance >= 100 then
+		return true
+	end
+	return math.random(100) <= chance
+end
+
+local function actor_revenge_squad_active(squad)
+	return squad
+		and squad.zhopa2_task == TASK_REVENGE
+		and tonumber(squad.zhopa2_target) == ACTOR_TARGET_ID
+		and squad_npc_count(squad) > 0
+		and squad_commander_id(squad) ~= nil
+end
+
+local function active_actor_revenge_exists()
+	local squad = active_actor_revenge_squad_id and alife_object(active_actor_revenge_squad_id) or nil
+	if actor_revenge_squad_active(squad) then
+		return true
+	end
+	active_actor_revenge_squad_id = nil
+	return false
+end
+
+local function current_actor_level()
+	local sim_fn = rawget(_G, "alife")
+	if type(sim_fn) ~= "function" then
+		return nil
+	end
+	local sim = sim_fn()
+	local actor = sim and sim:actor() or nil
+	return obj_level(actor)
+end
+
+local function each_revenge_squad(actor_only, fn)
+	if type(fn) ~= "function" then
+		return
+	end
+	local seen = {}
+	local function visit_squad_id(squad_id)
+		squad_id = tonumber(squad_id) or squad_id
+		if not squad_id or seen[squad_id] then
+			return
+		end
+		seen[squad_id] = true
+		local squad = alife_object and alife_object(squad_id) or nil
+		if squad and squad.zhopa2_task == TASK_REVENGE and (not actor_only or tonumber(squad.zhopa2_target) == ACTOR_TARGET_ID) then
+			fn(squad)
+		end
+	end
+
+	visit_squad_id(active_actor_revenge_squad_id)
+	if not (SIMBOARD and SIMBOARD.squads) then
+		return
+	end
+	for squad_id in pairs(SIMBOARD.squads) do
+		visit_squad_id(squad_id)
+	end
+end
+
+function M.cancel_active_revenge(reason, actor_only)
+	local tasks = tasks_mod()
+	if not (tasks and type(tasks.cancel_revenge) == "function") then
+		return 0
+	end
+	local count = 0
+	local clear_actor_revenge = actor_only == true
+	each_revenge_squad(actor_only == true, function(squad)
+		local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+		if tasks.cancel_revenge(squad, reason or "revenge_day_expired") then
+			count = count + 1
+			if target_id == ACTOR_TARGET_ID then
+				clear_actor_revenge = true
+			end
+		end
+	end)
+	if clear_actor_revenge then
+		active_actor_revenge_squad_id = nil
+	end
+	return count
+end
+
+local function actor_revenge_squad_id_for_sleep()
+	local found_id = nil
+	each_revenge_squad(true, function(squad)
+		if not found_id and actor_revenge_squad_active(squad) then
+			found_id = squad.id
+		end
+	end)
+	return found_id
+end
+
+local function pause_actor_revenge_for_sleep(hours)
+	last_sleep_start_hour = current_hour()
+	sleep_paused_actor_revenge_squad_id = nil
+	sleep_paused_actor_revenge_touched_night = sleep_touches_night(hours, last_sleep_start_hour) or is_night_now()
+	if sleep_paused_actor_revenge_touched_night then
+		M.cancel_active_revenge("revenge_day_expired", false)
+		night_revenge_cancelled = true
+		return
+	end
+
+	local squad_id = actor_revenge_squad_id_for_sleep()
+	if squad_id then
+		sleep_paused_actor_revenge_squad_id = squad_id
+		M.cancel_active_revenge("revenge_sleep_pause", true)
+	end
+end
+
+local function restore_paused_actor_revenge_after_sleep()
+	local squad_id = sleep_paused_actor_revenge_squad_id
+	sleep_paused_actor_revenge_squad_id = nil
+	if not squad_id or sleep_paused_actor_revenge_touched_night or revenge_disabled_for_night() or active_actor_revenge_exists() then
+		sleep_paused_actor_revenge_touched_night = false
+		return false
+	end
+	sleep_paused_actor_revenge_touched_night = false
+
+	local squad = alife_object and alife_object(squad_id) or nil
+	if not (squad and squad_npc_count(squad) > 0 and squad_commander_id(squad)) then
+		return false
+	end
+	if type(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
+		return false
+	end
+	if squad.zhopa2_task == TASK_BASE_CAMPING then
+		return false
+	end
+	return M.assign_revenge(squad, ACTOR_TARGET_ID)
+end
+
+function M.apply_online_revenge_hostility()
+	if not cfg_bool("revenge_enabled", true) then
+		return false
+	end
+	if revenge_disabled_for_night() then
+		return false
+	end
+	local now = time_global and time_global() or 0
+	if now > 0 and now - last_hostility_update < HOSTILITY_UPDATE_INTERVAL_MS then
+		return false
+	end
+	last_hostility_update = now
+
+	local tasks = tasks_mod()
+	if not (tasks and type(tasks.apply_revenge_hostility) == "function") then
+		return false
+	end
+	local level_name = current_actor_level()
+	if not level_name then
+		return false
+	end
+
+	local seen = {}
+	local processed = 0
+	local applied = false
+	local function consider_squad_id(squad_id)
+		if processed >= HOSTILITY_MAX_SQUADS_PER_TICK or seen[squad_id] then
+			return
+		end
+		seen[squad_id] = true
+		local squad = alife_object(squad_id)
+		if squad and squad.zhopa2_task == TASK_REVENGE and obj_level(squad) == level_name then
+			processed = processed + 1
+			applied = tasks.apply_revenge_hostility(squad) or applied
+		end
+	end
+
+	local index = index_mod()
+	local candidates = index and type(index.squads_on_levels) == "function" and index.squads_on_levels({ level_name }, HOSTILITY_MAX_SQUADS_PER_TICK) or {}
+	for i = 1, #candidates do
+		local squad = candidates[i]
+		if squad and squad.id then
+			consider_squad_id(squad.id)
+		end
+	end
+	return applied
+end
+
+local function sleep_hours_from_ui(ui)
+	if ui and ui.forced ~= nil then
+		return tonumber(ui.forced) or 0
+	end
+	if ui and ui.time_track and type(ui.time_track.GetIValue) == "function" then
+		local ok, hours = pcall(ui.time_track.GetIValue, ui.time_track)
+		return ok and (tonumber(hours) or 0) or 0
+	end
+	return 0
+end
+
+local function install_sleep_hook()
+	if sleep_hook_installed then
+		return true
+	end
+	local ui_sleep_dialog = load_module("ui_sleep_dialog")
+	local ui_class = nil
+	if ui_sleep_dialog and ui_sleep_dialog.UISleep and type(ui_sleep_dialog.UISleep.OnButtonSleep) == "function" then
+		ui_class = ui_sleep_dialog.UISleep
+	end
+	if not ui_class then
+		local global_sleep = rawget(_G, "UISleep")
+		if global_sleep and type(global_sleep.OnButtonSleep) == "function" then
+			ui_class = global_sleep
+		end
+	end
+	if not ui_class then
+		return false
+	end
+	if ui_class.zhopa2_revenge_sleep_hooked then
+		sleep_hook_installed = true
+		return true
+	end
+	local original = ui_class.OnButtonSleep
+	ui_class.zhopa2_revenge_sleep_hooked = true
+	ui_class.zhopa2_revenge_on_button_sleep = original
+	function ui_class.OnButtonSleep(self, ...)
+		local hours = sleep_hours_from_ui(self)
+		pause_actor_revenge_for_sleep(hours)
+		return original(self, ...)
+	end
+	sleep_hook_installed = true
+	return true
+end
+
+local function actor_on_sleep(hours)
+	if sleep_touches_night(hours, last_sleep_start_hour) or is_night_now() then
+		M.cancel_active_revenge("revenge_day_expired", false)
+		night_revenge_cancelled = true
+	else
+		restore_paused_actor_revenge_after_sleep()
+	end
+	last_sleep_start_hour = nil
+	return false
+end
+
+local function actor_on_update()
+	if revenge_disabled_for_night() then
+		if not night_revenge_cancelled then
+			M.cancel_active_revenge("revenge_day_expired", false)
+			night_revenge_cancelled = true
+		end
+		return false
+	end
+	night_revenge_cancelled = false
+	return M.apply_online_revenge_hostility()
+end
+
+function M.assign_revenge(responder, offender_target_id)
+	if not (responder and offender_target_id ~= nil) then
+		return false
+	end
+	if revenge_disabled_for_night() then
+		return false
+	end
+	if responder.zhopa2_task == TASK_REVENGE or responder.zhopa2_task == TASK_BASE_CAMPING then
+		return false
+	end
+	local tasks = tasks_mod()
+	local ok = tasks and type(tasks.assign_revenge_interrupt) == "function" and tasks.assign_revenge_interrupt(responder, offender_target_id) or false
+	if ok and tonumber(offender_target_id) == ACTOR_TARGET_ID then
+		active_actor_revenge_squad_id = responder.id
+	end
+	return ok
+end
+
+function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
+	if not (victim_squad and victim_squad.id and se_npc and se_killer) then
+		return false
+	end
+	if not cfg_bool("revenge_enabled", true) then
+		return false
+	end
+	if revenge_disabled_for_night() then
+		return false
+	end
+	if victim_squad.zhopa2_task == TASK_REVENGE or victim_squad.zhopa2_task == TASK_BASE_CAMPING then
+		return false
+	end
+
+	local offender_squad, offender_target_id = killer_squad_and_target(se_killer)
+	if offender_squad and (offender_squad.zhopa2_task == TASK_REVENGE or offender_squad.zhopa2_task == TASK_BASE_CAMPING) then
+		return false
+	end
+	if not offender_target_id then
+		return false
+	end
+	local is_actor_target = offender_target_id == ACTOR_TARGET_ID
+	if is_actor_target and not cfg_bool("revenge_actor_enabled", true) then
+		return false
+	end
+	if offender_squad and offender_squad.id == victim_squad.id then
+		return false
+	end
+
+	if not mark_death_processed(victim_squad, offender_target_id) then
+		return false
+	end
+	if is_actor_target then
+		if active_actor_revenge_exists() then
+			return false
+		end
+		if not actor_revenge_roll_passed() then
+			return false
+		end
+	end
+	local responder = find_responder(victim_squad, offender_squad)
+	if not responder then
+		return false
+	end
+	return M.assign_revenge(responder, offender_target_id)
+end
+
+function M.on_npc_death_callback(victim, who)
+	if not actor_killer(who) then
+		return false
+	end
+	local victim_squad = squad_from_member(victim)
+	return M.on_squad_npc_death(victim_squad, victim, who)
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "squad_on_npc_death", M.on_squad_npc_death)
+		pcall(UnregisterScriptCallback, "npc_on_death_callback", M.on_npc_death_callback)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "actor_on_sleep", actor_on_sleep)
+	end
+	RegisterScriptCallback("squad_on_npc_death", M.on_squad_npc_death)
+	RegisterScriptCallback("npc_on_death_callback", M.on_npc_death_callback)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_sleep", actor_on_sleep)
+	install_sleep_hook()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_revenge = M
+return M

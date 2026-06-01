@@ -1,0 +1,1768 @@
+local M = {}
+
+M.TASK_REST = "REST"
+M.TASK_EXPLORE = "EXPLORE"
+M.TASK_FORCE_EXIT = "FORCE_EXIT"
+M.TASK_POPULATE = "POPULATE"
+M.TASK_BASE_CAMPING = "BASE_CAMPING"
+M.TASK_PATROL = "PATROL"
+M.TASK_NIGHT_REST = "NIGHT_REST"
+M.TASK_ARTEFACT = "ARTEFACT"
+M.TASK_HUNT = "HUNT"
+M.TASK_REVENGE = "REVENGE"
+
+local ACTOR_TARGET_ID = AC_ID or 0
+local REVENGE_GOODWILL = -3000
+local REVENGE_RELATION_ENEMY = "enemy"
+local TASK_SELECT_ATTEMPTS = 2
+local ASSIGNMENTS_PER_FRAME = 1
+local HUNT_NO_TARGET_COOLDOWN_SEC = 20
+local SURGE_CHECK_CACHE_MS = 250
+local TARGET_VALID_CACHE_MS = 500
+local surge_cache_active = false
+local surge_cache_next = 0
+local now_ms
+
+local function cfg()
+	return rawget(_G, "zhopa2_cfg")
+end
+
+local function perception()
+	local p = rawget(_G, "zhopa2_perception")
+	if not p and require then
+		pcall(require, "zhopa2_perception")
+		p = rawget(_G, "zhopa2_perception")
+	end
+	return p
+end
+
+local function memory_mod()
+	local mem = rawget(_G, "zhopa2_memory")
+	if not mem and require then
+		pcall(require, "zhopa2_memory")
+		mem = rawget(_G, "zhopa2_memory")
+	end
+	return mem
+end
+
+local function offline_combat_mod()
+	local mod = rawget(_G, "sim_offline_combat")
+	if not mod and require then
+		pcall(require, "sim_offline_combat")
+		mod = rawget(_G, "sim_offline_combat")
+	end
+	return mod
+end
+
+local function loot_mod()
+	local mod = rawget(_G, "zhopa2_loot")
+	if not mod and require then
+		pcall(require, "zhopa2_loot")
+		mod = rawget(_G, "zhopa2_loot")
+	end
+	return mod
+end
+
+local function artifacts_mod()
+	local mod = rawget(_G, "zhopa2_artifacts")
+	if not mod and require then
+		pcall(require, "zhopa2_artifacts")
+		mod = rawget(_G, "zhopa2_artifacts")
+	end
+	return mod
+end
+
+local update_debug
+
+local function cfg_bool(key, default)
+	local c = cfg()
+	if c and type(c.get_bool) == "function" then
+		return c.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local c = cfg()
+	if c and type(c.get_num) == "function" then
+		return tonumber(c.get_num(key, default)) or default
+	end
+	return default
+end
+
+local function squad_npc_count(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return 0
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) or 0
+end
+
+local function is_night_now()
+	local p = perception()
+	if p and type(p.is_night) == "function" then
+		return p.is_night() == true
+	end
+	local hour = level and level.get_time_hours and level.get_time_hours() or 12
+	hour = tonumber(hour) or 12
+	return hour >= 21 or hour <= 5
+end
+
+local function revenge_expired_by_night()
+	return is_night_now()
+end
+
+local function current_hour()
+	local hour = level and level.get_time_hours and level.get_time_hours() or 12
+	return tonumber(hour) or 12
+end
+
+local function surge_active_uncached()
+	local xc = rawget(_G, "xr_conditions")
+	local xf = xc and xc.surge_started or nil
+	if type(xf) == "function" then
+		local ok, res = pcall(xf)
+		if ok and res == true then
+			return true
+		elseif ok and res == false then
+			return false
+		end
+	end
+
+	local psm = rawget(_G, "psi_storm_manager")
+	if psm and type(psm.is_loaded) == "function" and type(psm.is_started) == "function" then
+		local ok_loaded, loaded = pcall(function()
+			return psm.is_loaded()
+		end)
+		if ok_loaded and loaded == true then
+			local ok_started, started = pcall(function()
+				return psm.is_started()
+			end)
+			if ok_started and started == true then
+				return true
+			end
+		end
+	end
+
+	local sm = rawget(_G, "surge_manager")
+	if sm and type(sm.is_loaded) == "function" and type(sm.is_started) == "function" then
+		local ok_loaded, loaded = pcall(function()
+			return sm.is_loaded()
+		end)
+		if ok_loaded and loaded == true then
+			local ok_started, started = pcall(function()
+				return sm.is_started()
+			end)
+			if ok_started and started == true then
+				return true
+			end
+		end
+	end
+
+	if level and type(level.is_surge) == "function" then
+		local ok, res = pcall(function()
+			return level.is_surge()
+		end)
+		if ok and res == true then
+			return true
+		end
+	end
+
+	return false
+end
+
+function M.surge_active(force_refresh)
+	local now = now_ms()
+	if force_refresh ~= true and now < surge_cache_next then
+		return surge_cache_active == true
+	end
+	surge_cache_active = surge_active_uncached() == true
+	surge_cache_next = now + SURGE_CHECK_CACHE_MS
+	return surge_cache_active
+end
+
+local function mutant_time_active(start_hour, end_hour)
+	local hour = current_hour()
+	local start_value = tonumber(start_hour) or 0
+	local end_value = tonumber(end_hour) or 0
+	if start_value >= end_value then
+		return hour < end_value or hour >= start_value
+	end
+	return hour >= start_value and hour < end_value
+end
+
+local function squad_section_name(squad)
+	return squad and squad.zhopa2_section_name or nil
+end
+
+local function config_faction_for_section(section)
+	if not (section and ini_sys and ini_sys.r_string_ex) then
+		return nil
+	end
+	local ok, faction = pcall(ini_sys.r_string_ex, ini_sys, section, "faction")
+	return ok and faction or nil
+end
+
+local function mutant_behavior_id(squad)
+	local player_id = squad and squad.player_id or nil
+	if player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_zombied"
+		or player_id == nil
+	then
+		local section_faction = config_faction_for_section(squad_section_name(squad))
+		if section_faction and section_faction ~= "" then
+			return section_faction
+		end
+	end
+	return player_id
+end
+
+now_ms = function()
+	if time_global then
+		return time_global()
+	end
+	return math.floor((os and os.clock and os.clock() or 0) * 1000)
+end
+
+local function current_frame_key()
+	local dev
+	if type(device) == "function" then
+		local ok, result = pcall(device)
+		dev = ok and result or nil
+	elseif type(device) == "table" or type(device) == "userdata" then
+		dev = device
+	end
+	if dev and dev.frame ~= nil then
+		return tonumber(dev.frame) or tostring(dev.frame)
+	end
+	return now_ms()
+end
+
+local last_assignment_tick = nil
+local assignments_this_tick = 0
+
+local function assignment_budget_open(squad)
+	local frame_key = current_frame_key()
+	if last_assignment_tick ~= frame_key then
+		last_assignment_tick = frame_key
+		assignments_this_tick = 0
+	end
+	if assignments_this_tick < ASSIGNMENTS_PER_FRAME then
+		assignments_this_tick = assignments_this_tick + 1
+		return true
+	end
+	return false
+end
+
+local function mark_task_no_target(squad, task)
+	if not squad then
+		return
+	end
+	squad.zhopa2_no_target_task = task
+	squad.zhopa2_no_target_until = now_ms() + HUNT_NO_TARGET_COOLDOWN_SEC * 1000
+	squad.zhopa2_last_result = string.lower(tostring(task or "task")) .. "_no_target"
+end
+
+local function clear_task_no_target(squad, task)
+	if squad and squad.zhopa2_no_target_task == task then
+		squad.zhopa2_no_target_task = nil
+		squad.zhopa2_no_target_until = nil
+	end
+end
+
+local function task_no_target_cooldown_active(squad, task)
+	if not (squad and squad.zhopa2_no_target_task == task) then
+		return false
+	end
+	local until_ms = tonumber(squad.zhopa2_no_target_until) or 0
+	if until_ms <= now_ms() then
+		clear_task_no_target(squad, task)
+		return false
+	end
+	squad.zhopa2_last_result = string.lower(tostring(task or "task")) .. "_no_target_cooldown"
+	return true
+end
+
+local function target_valid_cache_key(squad, task, target)
+	return table.concat({
+		tostring(task or ""),
+		tostring(squad and squad.zhopa2_target or ""),
+		tostring(squad and squad.m_game_vertex_id or ""),
+		tostring(target and target.m_game_vertex_id or ""),
+	}, "|")
+end
+
+local function target_valid_cache_hit(squad, key)
+	if not (squad and key) then
+		return false
+	end
+	return squad.zhopa2_target_valid_key == key and tonumber(squad.zhopa2_target_valid_until or 0) > now_ms()
+end
+
+local function target_valid_cache_store(squad, key)
+	if squad and key then
+		squad.zhopa2_target_valid_key = key
+		squad.zhopa2_target_valid_until = now_ms() + TARGET_VALID_CACHE_MS
+	end
+end
+
+local function target_valid_cache_clear(squad)
+	if squad then
+		squad.zhopa2_target_valid_key = nil
+		squad.zhopa2_target_valid_until = nil
+	end
+end
+
+local function is_monster_squad(squad)
+	local p = perception()
+	if p and type(p.is_monster_squad) == "function" then
+		return p.is_monster_squad(squad)
+	end
+	local player_id = mutant_behavior_id(squad)
+	return player_id ~= nil and (
+		player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_predatory_day"
+		or player_id == "monster_predatory_night"
+		or player_id == "monster_vegetarian"
+		or player_id == "monster_zombied"
+		or player_id == "monster_zombied_day"
+		or player_id == "monster_zombied_night"
+		or player_id == "zombied"
+		or (is_squad_monster and is_squad_monster[player_id] == true)
+	)
+end
+
+local task_registry = {
+	stalker = {},
+	mutant = {},
+}
+M.task_registry = task_registry
+
+local mutant_invalid_stalker_tasks = {
+	[M.TASK_POPULATE] = true,
+	[M.TASK_NIGHT_REST] = true,
+	[M.TASK_ARTEFACT] = true,
+}
+
+local function mutant_has_stalker_task(squad, task)
+	return is_monster_squad(squad) and task ~= nil and mutant_invalid_stalker_tasks[task] == true
+end
+
+local function make_choice(task, target, weight, reason, duration, patrol)
+	if not target then
+		return nil
+	end
+	local task_weight_value = tonumber(weight) or 1
+	if task_weight_value <= 0 then
+		return nil
+	end
+	return {
+		task = task,
+		target = target,
+		weight = task_weight_value,
+		reason = reason or task,
+		duration = duration or 0,
+		patrol = patrol,
+	}
+end
+
+local function task_weight(key, default)
+	return cfg_num(key, default)
+end
+
+local registry_weight_keys = {
+	["stalker"] = {
+		["EXPLORE"] = { key = "stalker_explore_weight", default = 40, enabled = "explore_enabled", enabled_default = true },
+		["POPULATE"] = { key = "stalker_populate_weight", default = 20, enabled = "populate_enabled", enabled_default = true },
+		["PATROL"] = { key = "stalker_patrol_weight", default = 25, enabled = "patrol_enabled", enabled_default = true },
+		["HUNT"] = { key = "stalker_hunt_weight", default = 15, enabled = "stalker_hunt_enabled", enabled_default = true },
+		["ARTEFACT"] = { key = "stalker_artefact_weight", default = 10, enabled = "artefact_enabled", enabled_default = false },
+	},
+	["mutant"] = {
+		["HUNT"] = { key = "mutant_hunt_weight", default = 35, enabled = "mutant_hunt_enabled", enabled_default = true },
+		["PATROL"] = { key = "mutant_patrol_weight", default = 30, enabled = "mutant_patrol_enabled", enabled_default = true },
+		["EXPLORE"] = { key = "mutant_explore_weight", default = 35, enabled = "mutant_explore_enabled", enabled_default = true },
+	},
+}
+
+local function registry_weight_meta(pool, name)
+	local by_pool = registry_weight_keys[pool]
+	return by_pool and by_pool[name] or nil
+end
+
+local function register_task(pool, name, builder)
+	if type(pool) ~= "string" or type(builder) ~= "function" then
+		return
+	end
+	local list = task_registry[pool]
+	if not list then
+		list = {}
+		task_registry[pool] = list
+	end
+	local meta = registry_weight_meta(pool, name) or {}
+	list[#list + 1] = { name = name, build = builder, weight_key = meta.key, weight_default = meta.default or 1, enabled_key = meta.enabled, enabled_default = meta.enabled_default }
+end
+M.register_task = register_task
+
+local function pick_weighted(list)
+	local total = 0
+	for i = 1, #list do
+		total = total + (tonumber(list[i].weight) or 1)
+	end
+	if total <= 0 then
+		return nil
+	end
+
+	local roll = math.random(total)
+	local acc = 0
+	for i = 1, #list do
+		acc = acc + (tonumber(list[i].weight) or 1)
+		if roll <= acc then
+			return list[i]
+		end
+	end
+	return list[#list]
+end
+
+local function registry_entry_weight(entry)
+	if not entry then
+		return 0
+	end
+	if entry.enabled_key and not cfg_bool(entry.enabled_key, entry.enabled_default ~= false) then
+		return 0
+	end
+	local value = entry.weight_key and task_weight(entry.weight_key, entry.weight_default or 1) or entry.weight_default or 1
+	value = tonumber(value) or 0
+	if value < 0 then
+		return 0
+	end
+	return value
+end
+
+local function pick_registry_entry(list, tried)
+	local pool = {}
+	for i = 1, #list do
+		local entry = list[i]
+		if entry and not tried[entry.name] then
+			local entry_weight = registry_entry_weight(entry)
+			if entry_weight > 0 then
+				pool[#pool + 1] = { entry = entry, weight = entry_weight }
+			end
+		end
+	end
+	local selected = pick_weighted(pool)
+	return selected and selected.entry or nil
+end
+
+function update_debug(squad)
+	local dbg = rawget(_G, "zhopa2_debug_hud")
+	if dbg and type(dbg.update_squad) == "function" then
+		dbg.update_squad(squad)
+	end
+end
+
+local function assign_rest(squad, reason)
+	if not (squad and type(squad.zhopa2_assign_rest) == "function") then
+		return false
+	end
+	squad:zhopa2_assign_rest(reason)
+	return true
+end
+
+local function final_smart(p, squad, smart, opts)
+	if smart and p and type(p.pick_final_prior_smart) == "function" then
+		return p.pick_final_prior_smart(squad, smart, opts)
+	end
+	return smart
+end
+
+local function force_exit_target(squad)
+	local p = perception()
+	local level_name = p and p.obj_level and p.obj_level(squad) or nil
+	local current_smart = squad.smart_id and alife_object(squad.smart_id) or nil
+	local c = cfg()
+	local blocked = false
+	if c and type(c.is_level_blacklisted_for_squad) == "function" then
+		blocked = c.is_level_blacklisted_for_squad(squad, level_name) == true
+	end
+	if not blocked and c and type(c.is_smart_blacklisted_for_squad) == "function" and current_smart then
+		blocked = c.is_smart_blacklisted_for_squad(squad, current_smart, level_name) == true
+	end
+	if not blocked then
+		return nil
+	end
+
+	local monster = is_monster_squad(squad)
+	local kind = monster and "mutant" or "rest"
+	local target = p and p.pick_weighted_smart and p.pick_weighted_smart(squad, {
+		level_mode = "neighbor",
+		fallback_level_mode = "nearby",
+		kind = kind,
+		ignore_population = false,
+		exclude_current = true,
+		skip_prior = monster,
+	}) or nil
+	if not target and not monster and p and p.pick_weighted_smart then
+		local fallback_target = p.pick_weighted_smart(squad, {
+			level_mode = "neighbor",
+			fallback_level_mode = "nearby",
+			ignore_population = false,
+			exclude_current = true,
+			skip_prior = false,
+		})
+		target = fallback_target
+	end
+	target = final_smart(p, squad, target, { ignore_population = false, skip_prior = monster })
+	return target and target.id or nil
+end
+
+local function build_stalker_explore(squad)
+	local p = perception()
+	if not (cfg_bool("explore_enabled", true) and p) then
+		return nil
+	end
+	local opts = { level_mode = "neighbor", fallback_level_mode = "nearby", kind = "rest", ignore_population = false, exclude_current = true, skip_prior = true }
+	local smart = p.pick_weighted_smart and p.pick_weighted_smart(squad, opts)
+		or p.pick_smart and p.pick_smart(squad, { level_mode = "current_or_neighbor", ignore_population = false, exclude_current = true, skip_prior = true })
+	smart = final_smart(p, squad, smart, opts)
+	return smart and make_choice(M.TASK_EXPLORE, smart.id, task_weight("stalker_explore_weight", 40), "explore") or nil
+end
+
+local function build_stalker_populate(squad)
+	local p = perception()
+	if not (cfg_bool("populate_enabled", true) and p and p.pick_weighted_smart) then
+		return nil
+	end
+	local smart
+	local populate_reason = "populate"
+	if type(p.pick_base_camping_populate_smart) == "function" then
+		local populate_opts = {
+			level_mode = "current_or_nearby",
+			kind = "base",
+			ignore_population = true,
+			exclude_current = true,
+			skip_prior = true,
+			skip_target_precondition = true,
+			safe_rest = true,
+			base_populate_level_priority = true,
+		}
+		smart = p.pick_base_camping_populate_smart(squad, populate_opts)
+		if smart then
+			populate_reason = "populate_base_camping"
+		end
+	end
+	local opts = { level_mode = "current_or_neighbor", fallback_level_mode = "nearby", kind = "rest", populate = true, exclude_current = true, skip_prior = true }
+	if not smart then
+		smart = p.pick_weighted_smart(squad, opts)
+	end
+	smart = final_smart(p, squad, smart, opts)
+	return smart and make_choice(M.TASK_POPULATE, smart.id, task_weight("stalker_populate_weight", 20), populate_reason) or nil
+end
+
+local function build_stalker_patrol(squad)
+	local p = perception()
+	if not (cfg_bool("patrol_enabled", true) and p and p.make_patrol) then
+		return nil
+	end
+	local patrol = p.make_patrol(squad, nil)
+	if not patrol then
+		return nil
+	end
+	local packed = p.pack_ids and p.pack_ids(patrol) or nil
+	return make_choice(M.TASK_PATROL, patrol[1], task_weight("stalker_patrol_weight", 25), "patrol", cfg_num("patrol_duration_game_hours", 1) * 3600, packed)
+end
+
+local function build_stalker_hunt(squad)
+	local p = perception()
+	if not (cfg_bool("stalker_hunt_enabled", true) and p and p.pick_hunt_target) then
+		return nil
+	end
+	if task_no_target_cooldown_active(squad, "HUNT") then
+		return nil
+	end
+	local target = p.pick_hunt_target(squad, { level_mode = "same", prey = "enemy" })
+	if target then
+		clear_task_no_target(squad, "HUNT")
+		return make_choice(M.TASK_HUNT, target.id, task_weight("stalker_hunt_weight", 15), "stalker_hunt")
+	end
+	mark_task_no_target(squad, "HUNT")
+	return nil
+end
+
+local function build_stalker_artefact(squad)
+	local artifacts = artifacts_mod()
+	if not (cfg_bool("artefact_enabled", false) and artifacts and type(artifacts.pick_target) == "function") then
+		return nil
+	end
+	local target = artifacts.pick_target(squad, { level_mode = "current_or_neighbor", fallback_level_mode = "nearby", exclude_current = true })
+	local smart = target and target.smart or nil
+	if not smart then
+		return nil
+	end
+	local choice = make_choice(M.TASK_ARTEFACT, smart.id, task_weight("stalker_artefact_weight", 10), target.reason or "artefact_route")
+	if choice then
+		choice.artifact_id = target.artifact_id
+		choice.artifact_section = target.section
+	end
+	return choice
+end
+
+local function build_mutant_hunt(squad)
+	local p = perception()
+	if not (cfg_bool("mutant_hunt_enabled", true) and p and p.pick_hunt_target) then
+		return nil
+	end
+	if task_no_target_cooldown_active(squad, "HUNT") then
+		return nil
+	end
+	local target = p.pick_hunt_target(squad, { level_mode = "same", prey = "stalker" })
+	if target then
+		clear_task_no_target(squad, "HUNT")
+		return make_choice(M.TASK_HUNT, target.id, task_weight("mutant_hunt_weight", 35), "mutant_hunt")
+	end
+	mark_task_no_target(squad, "HUNT")
+	return nil
+end
+
+local function build_mutant_patrol(squad)
+	local p = perception()
+	if not (cfg_bool("mutant_patrol_enabled", true) and p and p.make_patrol) then
+		return nil
+	end
+	local patrol = p.make_patrol(squad, "mutant")
+	if not patrol then
+		return nil
+	end
+	local packed = p.pack_ids and p.pack_ids(patrol) or nil
+	return make_choice(M.TASK_PATROL, patrol[1], task_weight("mutant_patrol_weight", 30), "mutant_patrol", cfg_num("mutant_patrol_duration_game_hours", 1) * 3600, packed)
+end
+
+local function build_mutant_explore(squad)
+	local p = perception()
+	if not (cfg_bool("mutant_explore_enabled", true) and p and p.pick_weighted_smart) then
+		return nil
+	end
+	local opts = { level_mode = "current_or_neighbor", fallback_level_mode = "nearby", kind = "mutant", ignore_population = false, exclude_current = true, skip_prior = true }
+	local smart = p.pick_weighted_smart(squad, opts)
+	smart = final_smart(p, squad, smart, opts)
+	return smart and make_choice(M.TASK_EXPLORE, smart.id, task_weight("mutant_explore_weight", 35), "mutant_explore") or nil
+end
+
+register_task("stalker", M.TASK_EXPLORE, build_stalker_explore)
+register_task("stalker", M.TASK_POPULATE, build_stalker_populate)
+register_task("stalker", M.TASK_PATROL, build_stalker_patrol)
+register_task("stalker", M.TASK_HUNT, build_stalker_hunt)
+register_task("stalker", M.TASK_ARTEFACT, build_stalker_artefact)
+register_task("mutant", M.TASK_HUNT, build_mutant_hunt)
+register_task("mutant", M.TASK_PATROL, build_mutant_patrol)
+register_task("mutant", M.TASK_EXPLORE, build_mutant_explore)
+
+local function select_from_registry(pool, squad)
+	local list = task_registry[pool] or {}
+	local attempts = TASK_SELECT_ATTEMPTS
+	local tried = {}
+	for i = 1, math.min(#list, attempts) do
+		local entry = pick_registry_entry(list, tried)
+		if not entry then
+			break
+		end
+		tried[entry.name] = true
+		local choice = entry.build(squad)
+		if choice then
+			return choice
+		end
+	end
+	return nil
+end
+
+local select_stalker_night_rest
+
+local function select_stalker_task(squad)
+	if is_monster_squad(squad) then
+		return nil
+	end
+
+	local force_target = force_exit_target(squad)
+	if force_target then
+		return make_choice(M.TASK_FORCE_EXIT, force_target, 100, "blacklist_exit")
+	end
+
+	local night_rest = select_stalker_night_rest(squad)
+	if night_rest then
+		return night_rest
+	end
+
+	return select_from_registry("stalker", squad)
+end
+
+function select_stalker_night_rest(squad)
+	if is_monster_squad(squad) then
+		return nil
+	end
+
+	local p = perception()
+	if cfg_bool("night_rest_enabled", true) and p and p.is_night and p.is_night() then
+		local order = {
+			{ "same", "base", "night_rest_base" },
+			{ "same", "surge", "night_rest_surge" },
+			{ "same", "rest", "night_rest_rest" },
+			{ "neighbor", "base", "night_rest_base" },
+			{ "neighbor", "surge", "night_rest_surge" },
+			{ "neighbor", "rest", "night_rest_rest" },
+			{ "nearby", "base", "night_rest_base" },
+			{ "nearby", "surge", "night_rest_surge" },
+			{ "nearby", "rest", "night_rest_rest" },
+		}
+		for i = 1, #order do
+			local opts = {
+				level_mode = order[i][1],
+				kind = order[i][2],
+				ignore_population = true,
+				skip_prior = true,
+				safe_rest = true,
+				skip_target_precondition = true,
+			}
+			local smart = p.pick_balanced_rest_smart and p.pick_balanced_rest_smart(squad, opts)
+				or p.pick_closest_smart and p.pick_closest_smart(squad, opts)
+				or p.pick_smart and p.pick_smart(squad, opts)
+				or nil
+			smart = final_smart(p, squad, smart, opts)
+			if smart then
+				return make_choice(M.TASK_NIGHT_REST, smart.id, 100, order[i][3])
+			end
+		end
+	end
+	return nil
+end
+
+local function select_mutant_task(squad)
+	local force_target = force_exit_target(squad)
+	if force_target then
+		return make_choice(M.TASK_FORCE_EXIT, force_target, 100, "blacklist_exit")
+	end
+
+	local p = perception()
+	if p and p.is_night and p.is_night() then
+		if task_no_target_cooldown_active(squad, "HUNT") then
+			return nil
+		end
+		return build_mutant_hunt(squad)
+	end
+
+	return select_from_registry("mutant", squad)
+end
+
+local function mutant_night_hunt_only(squad)
+	local p = perception()
+	return is_monster_squad(squad) and p and p.is_night and p.is_night() == true
+end
+
+local function night_rest_target_unsafe(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_NIGHT_REST and not is_monster_squad(squad)) then
+		return false
+	end
+	local p = perception()
+	if not (p and type(p.safe_rest_target_valid) == "function") then
+		return false
+	end
+	return p.safe_rest_target_valid(squad, squad.zhopa2_target) ~= true
+end
+
+local function assign_choice(squad, choice, fallback_reason)
+	if choice and type(squad.zhopa2_assign_task) == "function" then
+		if mutant_has_stalker_task(squad, choice.task) then
+			squad.zhopa2_last_reason = "mutant_reject_stalker_task"
+			squad.zhopa2_last_result = "mutant_reject_stalker_task"
+			update_debug(squad)
+			return false
+		end
+		if squad:zhopa2_assign_task(choice.task, choice.target, choice.duration or 0, choice.reason or fallback_reason, choice.patrol) == false then
+			if choice.task == M.TASK_ARTEFACT then
+				local artifacts = artifacts_mod()
+				if artifacts and type(artifacts.release_reservation) == "function" then
+					artifacts.release_reservation(squad, "artifact_assign_failed")
+				end
+			end
+			return false
+		end
+		if choice.task == M.TASK_ARTEFACT and choice.artifact_id then
+			squad.zhopa2_artifact_id = tonumber(choice.artifact_id)
+			squad.zhopa2_artifact_section = choice.artifact_section
+		end
+		return true
+	end
+	return false
+end
+
+local function assign_stalker_hunt_or_rest(squad, reason)
+	local choice = build_stalker_hunt(squad)
+	if assign_choice(squad, choice, reason or "after_HUNT_continue") then
+		return true
+	end
+	return assign_rest(squad, "after_HUNT_rest")
+end
+
+local function repair_invalid_mutant_task(squad)
+	if not (squad and squad.zhopa2_task and mutant_has_stalker_task(squad, squad.zhopa2_task)) then
+		return false
+	end
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task("mutant_stalker_task_repair")
+	else
+		squad.zhopa2_task = nil
+		squad.zhopa2_target = nil
+		squad.scripted_target = nil
+	end
+	M.assign_next_task(squad, "mutant_task_repair")
+	update_debug(squad)
+	return true
+end
+
+local function mutant_time_inactive(squad)
+	if not is_monster_squad(squad) then
+		return false
+	end
+	local player_id = mutant_behavior_id(squad)
+	if player_id == "monster_predatory_day" or player_id == "monster_zombied_day" then
+		return not mutant_time_active(6, 19)
+	elseif player_id == "monster_predatory_night" or player_id == "monster_zombied_night" then
+		return not mutant_time_active(19, 6)
+	end
+	return false
+end
+
+local function clear_zhopa2_movement_target(squad, clear_any)
+	if not (squad and squad.zhopa2_task) then
+		return
+	end
+	local target = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+	local rest_target = squad.zhopa2_task == M.TASK_REST and squad.id or nil
+	if tostring(squad.scripted_target) == tostring(target) or (rest_target and tostring(squad.scripted_target) == tostring(rest_target)) then
+		squad.scripted_target = nil
+	end
+	if clear_any
+		or tostring(squad.assigned_target_id) == tostring(target)
+		or tostring(squad.current_target_id) == tostring(target)
+		or (rest_target and (tostring(squad.assigned_target_id) == tostring(rest_target) or tostring(squad.current_target_id) == tostring(rest_target)))
+	then
+		squad.assigned_target_id = nil
+		squad.current_target_id = nil
+		squad.current_action = nil
+		squad.task_target_id = nil
+	end
+	if type(squad.zhopa2_release_task_rush) == "function" then
+		squad:zhopa2_release_task_rush()
+	else
+		squad.rush_to_target = nil
+	end
+end
+
+local function pause_for_surge(squad)
+	if not M.surge_active() then
+		if squad and squad.zhopa2_surge_paused then
+			squad.zhopa2_surge_paused = nil
+			if squad.zhopa2_task and squad.zhopa2_target and not squad.scripted_target then
+				squad.scripted_target = squad.zhopa2_target
+				squad.assigned_target_id = nil
+				squad.current_target_id = nil
+				squad.current_action = 0
+			end
+			squad.zhopa2_last_result = "surge_resume"
+			update_debug(squad)
+		end
+		return false
+	end
+
+	if squad and squad.zhopa2_task then
+		local first_pause = squad.zhopa2_surge_paused ~= true
+		squad.zhopa2_surge_paused = true
+		squad.zhopa2_last_reason = "surge_pause"
+		squad.zhopa2_last_result = "surge_pause"
+		if first_pause then
+			clear_zhopa2_movement_target(squad, true)
+		else
+			clear_zhopa2_movement_target(squad, false)
+		end
+		update_debug(squad)
+	end
+	return true
+end
+
+local function park_inactive_mutant(squad)
+	if not mutant_time_inactive(squad) then
+		return false
+	end
+	if squad.zhopa2_task and type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task("mutant_time_inactive")
+	elseif squad.zhopa2_task then
+		squad.zhopa2_task = nil
+		squad.zhopa2_target = nil
+		squad.zhopa2_started = nil
+		squad.zhopa2_until = nil
+		squad.zhopa2_patrol = nil
+		squad.zhopa2_patrol_idx = nil
+		squad.scripted_target = nil
+	end
+	squad.assigned_target_id = squad.id
+	squad.current_target_id = squad.id
+	squad.current_action = 0
+	squad.zhopa2_last_reason = "mutant_time_inactive"
+	squad.zhopa2_last_result = "mutant_time_inactive"
+	update_debug(squad)
+	return true
+end
+
+function M.interrupt_task(squad, task, target_id, duration_sec, reason, patrol, opts)
+	opts = opts or {}
+	if not (squad and task and target_id ~= nil and type(squad.zhopa2_assign_task) == "function") then
+		return false
+	end
+	if mutant_has_stalker_task(squad, task) then
+		squad.zhopa2_last_reason = "mutant_reject_stalker_task"
+		squad.zhopa2_last_result = "mutant_reject_stalker_task"
+		update_debug(squad)
+		return false
+	end
+
+	local current_task = squad.zhopa2_task
+	if opts.deny_from and opts.deny_from[current_task] then
+		return false
+	end
+	if opts.allow_from and not opts.allow_from[current_task] then
+		return false
+	end
+
+	local snapshot_reason = opts.snapshot_reason or reason or "interrupt"
+	if opts.snapshot and current_task then
+		local memory = memory_mod()
+		if memory and type(memory.snapshot_task) == "function" then
+			memory.snapshot_task(squad, snapshot_reason)
+		end
+	end
+
+	local clear_reason = opts.clear_reason or reason or "interrupt"
+	if opts.cleanup_current ~= false and current_task and type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(clear_reason)
+	end
+
+	squad:zhopa2_assign_task(task, target_id, duration_sec or 0, reason or task, patrol)
+	if opts.result then
+		squad.zhopa2_last_result = opts.result
+	end
+	update_debug(squad)
+	return true
+end
+
+function M.assign_revenge_interrupt(responder, offender_target_id)
+	return M.interrupt_task(responder, M.TASK_REVENGE, offender_target_id, 0, "revenge", nil, {
+		snapshot = true,
+		snapshot_reason = "revenge_interrupt",
+		clear_reason = "revenge_interrupt",
+		deny_from = { [M.TASK_REVENGE] = true, [M.TASK_BASE_CAMPING] = true },
+		result = "revenge_assigned",
+	})
+end
+
+function M.assign_base_camping_permanent(squad, smart, reason)
+	if not (squad and smart and smart.id) then
+		return false
+	end
+	if squad.zhopa2_task == M.TASK_BASE_CAMPING and tonumber(squad.zhopa2_target) == smart.id then
+		return true
+	end
+	local base_camping_deny_from = {
+		[M.TASK_HUNT] = true,
+		[M.TASK_REVENGE] = true,
+		[M.TASK_BASE_CAMPING] = true,
+		[M.TASK_NIGHT_REST] = true,
+		[M.TASK_FORCE_EXIT] = true,
+	}
+	local assign_reason = reason or "base_camping_empty_base"
+	return M.interrupt_task(squad, M.TASK_BASE_CAMPING, smart.id, 0, assign_reason, nil, {
+		snapshot = true,
+		snapshot_reason = assign_reason,
+		clear_reason = assign_reason,
+		result = "base_camping_permanent",
+		deny_from = base_camping_deny_from,
+	})
+end
+
+local function hunt_prey_for(squad)
+	return is_monster_squad(squad) and "stalker" or "enemy"
+end
+
+local function actor_target_alive()
+	local actor = db and db.actor or nil
+	if not actor and alife then
+		local sim = alife()
+		actor = sim and sim:actor() or nil
+	end
+	if not actor then
+		return false
+	end
+	if type(actor.alive) == "function" then
+		local ok, alive = pcall(actor.alive, actor)
+		return ok and alive == true
+	end
+	return true
+end
+
+local function game_vertex_level_id(obj)
+	local gg = game_graph()
+	if not (gg and obj and obj.m_game_vertex_id and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	return gg:vertex(obj.m_game_vertex_id):level_id()
+end
+
+local function squad_community(squad)
+	if squad and type(squad.get_squad_community) == "function" then
+		local ok, community = pcall(squad.get_squad_community, squad)
+		if ok and community then
+			return community
+		end
+	end
+	return squad and squad.player_id or nil
+end
+
+local function same_smart_or_close(squad, target)
+	if squad.smart_id and squad.smart_id == target.smart_id then
+		return true
+	end
+	if not (squad.position and target.position) then
+		return false
+	end
+	local max_dist = cfg_num("hunt_offline_combat_distance", 25)
+	local ok, dist = pcall(function()
+		return squad.position:distance_to_sqr(target.position)
+	end)
+	return ok and tonumber(dist) and dist <= max_dist * max_dist
+end
+
+local function factions_hostile(community_1, community_2)
+	if not (community_1 and community_2 and game_relations and type(game_relations.is_factions_enemies) == "function") then
+		return false
+	end
+	local ok, hostile = pcall(game_relations.is_factions_enemies, community_1, community_2)
+	return ok and hostile == true
+end
+
+local function member_server_object(member)
+	if not member then
+		return nil
+	end
+	return member.object or (member.id and alife_object(member.id)) or nil
+end
+
+local function member_online_object(member)
+	local id = member and member.id or nil
+	if not id then
+		return nil
+	end
+	local storage = db and db.storage and db.storage[id] or nil
+	if storage and storage.object then
+		return storage.object
+	end
+	return level and type(level.object_by_id) == "function" and level.object_by_id(id) or nil
+end
+
+local function is_inventory_owner_object(obj)
+	if not (obj and IsStalker) then
+		return false
+	end
+	local ok, is_stalker = pcall(IsStalker, obj)
+	if ok and is_stalker == true then
+		return true
+	end
+	if type(obj.clsid) ~= "function" then
+		return false
+	end
+	local ok_cls, class_id = pcall(obj.clsid, obj)
+	return ok_cls and IsStalker(nil, class_id) == true
+end
+
+local function member_inventory_owner_server_object(member)
+	local obj = member_server_object(member)
+	return is_inventory_owner_object(obj) and obj or nil
+end
+
+local function inventory_owner_target(target)
+	if target == nil then
+		return false
+	end
+	if type(target) == "number" then
+		return is_inventory_owner_object(alife_object(target))
+	end
+	return is_inventory_owner_object(target)
+end
+
+local function force_goodwill(source, goodwill, target)
+	if not (source and target ~= nil) then
+		return false
+	end
+	if not (is_inventory_owner_object(source) and inventory_owner_target(target)) then
+		return false
+	end
+	local ok = pcall(function()
+		source:force_set_goodwill(goodwill, target)
+	end)
+	return ok == true
+end
+
+local function is_online_relation_stalker(obj)
+	if not (obj and IsStalker) then
+		return false
+	end
+	local ok, is_stalker = pcall(IsStalker, obj)
+	if ok and is_stalker == true then
+		return true
+	end
+	return false
+end
+
+local function online_relation_matches(source, target, relation)
+	local ok_relation, current = pcall(function()
+		return source:relation(target)
+	end)
+	return ok_relation and current == relation
+end
+
+local function set_online_relation(source, target, relation, goodwill)
+	if not (relation and is_online_relation_stalker(source) and is_online_relation_stalker(target)) then
+		return false
+	end
+	local ok = pcall(function()
+		source:set_relation(relation, target)
+	end)
+	if ok == true and online_relation_matches(source, target, relation) then
+		return true
+	end
+	if goodwill ~= nil then
+		force_goodwill(source, goodwill, target)
+		return online_relation_matches(source, target, relation)
+	end
+	return false
+end
+
+local function set_squad_actor_relation(squad, relation)
+	if not (squad and type(squad.set_squad_relation) == "function") then
+		return false
+	end
+	local ok = pcall(function()
+		squad:set_squad_relation(relation)
+	end)
+	return ok == true
+end
+
+local function force_member_to_actor(member)
+	local applied = false
+	local obj = member_online_object(member)
+	if obj and db and db.actor and game_object then
+		applied = set_online_relation(obj, db.actor, game_object.enemy, REVENGE_GOODWILL) or applied
+	end
+	return applied
+end
+
+local function force_member_to_member(member_1, member_2, goodwill)
+	local applied = false
+	local obj_1 = member_online_object(member_1)
+	local obj_2 = member_online_object(member_2)
+	if obj_1 and obj_2 and game_object then
+		applied = set_online_relation(obj_1, obj_2, game_object.enemy, goodwill) or applied
+		applied = set_online_relation(obj_2, obj_1, game_object.enemy, goodwill) or applied
+	end
+	if applied then
+		return true
+	end
+
+	local se_1 = member_inventory_owner_server_object(member_1)
+	local se_2 = member_inventory_owner_server_object(member_2)
+	if se_1 and se_2 and se_2.id then
+		applied = force_goodwill(se_1, goodwill, se_2.id) or applied
+	end
+	if se_2 and se_1 and se_1.id then
+		applied = force_goodwill(se_2, goodwill, se_1.id) or applied
+	end
+	return applied
+end
+
+local function actor_on_squad_level(squad)
+	if not (db and db.actor) then
+		return false
+	end
+	if simulation_objects and type(simulation_objects.is_on_the_actor_level) == "function" then
+		return simulation_objects.is_on_the_actor_level(squad) == true
+	end
+	return squad and squad.online == true
+end
+
+local function same_level_for_hostility(squad, target)
+	local p = perception()
+	if p and type(p.obj_same_level) == "function" then
+		return p.obj_same_level(squad, target) == true
+	end
+	return squad and target and squad.level_name ~= nil and squad.level_name == target.level_name
+end
+
+function M.apply_revenge_hostility(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_REVENGE and squad.zhopa2_target ~= nil and type(squad.squad_members) == "function") then
+		return false
+	end
+
+	local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+	local applied = false
+	if target_id == ACTOR_TARGET_ID then
+		if not actor_on_squad_level(squad) then
+			return false
+		end
+		for member in squad:squad_members() do
+			applied = force_member_to_actor(member) or applied
+		end
+		if applied then
+			squad.zhopa2_revenge_hostility_target = ACTOR_TARGET_ID
+			squad.zhopa2_revenge_hostility_actor = true
+			squad.zhopa2_last_result = "revenge_actor_hostile"
+		else
+			squad.zhopa2_last_result = "revenge_actor_wait_online_relation"
+		end
+		return applied
+	end
+
+	local target = alife_object(target_id)
+	if not (target and squad.online == true and target.online == true and type(target.squad_members) == "function" and same_level_for_hostility(squad, target)) then
+		return false
+	end
+	for member_1 in squad:squad_members() do
+		for member_2 in target:squad_members() do
+			applied = force_member_to_member(member_1, member_2, REVENGE_GOODWILL) or applied
+		end
+	end
+	if applied then
+		squad.zhopa2_revenge_hostility_target = target_id
+		squad.zhopa2_revenge_hostility_actor = nil
+		squad.zhopa2_last_result = "revenge_squad_hostile"
+	else
+		squad.zhopa2_last_result = "revenge_squad_wait_online_relation"
+	end
+	return applied
+end
+
+function M.release_revenge_hostility(squad)
+	if not squad then
+		return false
+	end
+	local released = squad.zhopa2_revenge_hostility_target ~= nil or squad.zhopa2_revenge_hostility_actor ~= nil
+	squad.zhopa2_revenge_hostility_target = nil
+	squad.zhopa2_revenge_hostility_actor = nil
+	return released
+end
+
+local function record_offline_combat_loot(squad, target, target_count_before, reason)
+	local loot = loot_mod()
+	if not (loot and type(loot.record_offline_combat_loot) == "function") then
+		return false
+	end
+	local target_count_after = squad_npc_count(target)
+	local killed_count = math.max(0, (tonumber(target_count_before) or 0) - target_count_after)
+	if killed_count <= 0 then
+		return false
+	end
+	return loot.record_offline_combat_loot(squad, target, killed_count, reason or "offline_combat_loot")
+end
+
+function M.hunt_offline_tick(squad, target, opts)
+	opts = opts or {}
+	if not (cfg_bool("hunt_offline_combat_enabled", true) and squad and target) then
+		return false
+	end
+	if squad.online == true or target.online == true then
+		return false
+	end
+	local p = perception()
+	if p and type(p.obj_same_level) == "function" and not p.obj_same_level(squad, target) then
+		return false
+	end
+	if not same_smart_or_close(squad, target) then
+		return false
+	end
+
+	local now = time_global and time_global() or nil
+	if not now then
+		return false
+	end
+	local interval = math.max(5, cfg_num("hunt_offline_combat_interval_sec", 30)) * 1000
+	if squad.zhopa2_last_offline_hunt and now - squad.zhopa2_last_offline_hunt < interval then
+		return false
+	end
+	squad.zhopa2_last_offline_hunt = now
+
+	local combat = offline_combat_mod()
+	if not (combat and type(combat.simulate_battle) == "function") then
+		return false
+	end
+	local lid = game_vertex_level_id(squad)
+	local community_1 = squad_community(squad)
+	local community_2 = squad_community(target)
+	if not (lid and community_1 and community_2) then
+		return false
+	end
+	if opts.force ~= true and not factions_hostile(community_1, community_2) then
+		return false
+	end
+	local target_count_before = squad_npc_count(target)
+	combat.simulate_battle(squad.id, target.id, squad, target, community_1, community_2, lid)
+	record_offline_combat_loot(squad, target, target_count_before, opts.loot_result or opts.result or "hunt_offline_loot")
+	squad.zhopa2_last_result = opts.result or "hunt_offline_battle"
+	return true
+end
+
+function M.hunt_target_valid(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_HUNT and squad.zhopa2_target) then
+		return false, "hunt_target_invalid"
+	end
+
+	local target = alife_object(tonumber(squad.zhopa2_target) or squad.zhopa2_target)
+	if not target then
+		target_valid_cache_clear(squad)
+		return false, "hunt_target_missing"
+	end
+	if squad_npc_count(target) <= 0 then
+		target_valid_cache_clear(squad)
+		return false, "hunt_target_defeated"
+	end
+
+	local cache_key = target_valid_cache_key(squad, M.TASK_HUNT, target)
+	if target_valid_cache_hit(squad, cache_key) then
+		return true, nil
+	end
+
+	local p = perception()
+	if p and type(p.hunt_script_target) == "function" then
+		local script_target, route_reason = p.hunt_script_target(squad, target, { prey = hunt_prey_for(squad), allow_cross_level = true })
+		if not script_target then
+			target_valid_cache_clear(squad)
+			return false, route_reason or "hunt_target_invalid"
+		end
+	end
+	target_valid_cache_store(squad, cache_key)
+	return true, nil
+end
+
+local function revenge_wait_route(squad, reason)
+	if squad then
+		squad.zhopa2_last_reason = reason or "revenge_wait_route"
+		squad.zhopa2_last_result = reason or "revenge_wait_route"
+	end
+	return true, reason
+end
+
+function M.revenge_target_valid(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_REVENGE and squad.zhopa2_target ~= nil) then
+		return false, "revenge_target_invalid"
+	end
+
+	local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+	if target_id == ACTOR_TARGET_ID then
+		if not actor_target_alive() then
+			return revenge_wait_route(squad, "revenge_actor_missing")
+		end
+		local p = perception()
+		if p and type(p.actor_script_target) == "function" then
+			local script_target, route_reason = p.actor_script_target(squad, { allow_cross_level = true })
+			if not script_target then
+				return revenge_wait_route(squad, route_reason or "revenge_actor_wait_route")
+			end
+		end
+		return true, nil
+	end
+
+	local target = alife_object(target_id)
+	if not target then
+		target_valid_cache_clear(squad)
+		return false, "revenge_target_missing"
+	end
+	if squad_npc_count(target) <= 0 then
+		target_valid_cache_clear(squad)
+		return false, "revenge_target_defeated"
+	end
+
+	local cache_key = target_valid_cache_key(squad, M.TASK_REVENGE, target)
+	if target_valid_cache_hit(squad, cache_key) then
+		return true, nil
+	end
+
+	local p = perception()
+	if p and type(p.revenge_script_target) == "function" then
+		local script_target, route_reason = p.revenge_script_target(squad, target, { allow_cross_level = true })
+		if not script_target then
+			target_valid_cache_clear(squad)
+			return revenge_wait_route(squad, route_reason or "revenge_target_wait_route")
+		end
+	end
+	target_valid_cache_store(squad, cache_key)
+	return true, nil
+end
+
+local function abort_hunt(squad, reason)
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(reason or "hunt_target_invalid")
+	end
+	if mutant_night_hunt_only(squad) then
+		M.assign_next_task(squad, "after_HUNT_continue")
+	else
+		assign_rest(squad, reason or "hunt_target_invalid")
+	end
+end
+
+local function complete_hunt(squad, mem, target_id, reason)
+	if mem and type(mem.add_recent_target) == "function" then
+		mem.add_recent_target(squad, target_id)
+	end
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(reason or "completed_HUNT")
+	end
+
+	if is_monster_squad(squad) then
+		M.assign_next_task(squad, "after_HUNT_continue")
+	elseif math.random(100) <= 50 then
+		assign_stalker_hunt_or_rest(squad, "after_HUNT_continue")
+	else
+		assign_rest(squad, "after_HUNT_rest")
+	end
+end
+
+local function complete_revenge(squad, mem, target_id, reason)
+	if mem and type(mem.add_recent_target) == "function" then
+		mem.add_recent_target(squad, target_id)
+	end
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(reason or "completed_REVENGE")
+	end
+
+	if mem and type(mem.resume_task) == "function" and mem.resume_task(squad, "resume_after_REVENGE") then
+		return
+	end
+	assign_rest(squad, "after_REVENGE")
+end
+
+local function complete_populate(squad, target_id)
+	local smart = target_id and alife_object(tonumber(target_id) or target_id) or nil
+	local p = perception()
+	if smart and p and type(p.base_camping_populate_target_valid) == "function" and p.base_camping_populate_target_valid(squad, smart) then
+		return M.assign_base_camping_permanent(squad, smart, "populate_join_base_camping")
+	end
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task("completed_POPULATE")
+	end
+	return assign_rest(squad, "after_POPULATE")
+end
+
+local function complete_artefact(squad, reason)
+	local artifacts = artifacts_mod()
+	if artifacts and type(artifacts.complete) == "function" then
+		artifacts.complete(squad, reason or "completed_ARTEFACT")
+	end
+	if type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(reason or "completed_ARTEFACT")
+	end
+	return assign_rest(squad, "after_ARTEFACT")
+end
+
+function M.cancel_revenge(squad, reason)
+	if not (squad and squad.zhopa2_task == M.TASK_REVENGE) then
+		return false
+	end
+	complete_revenge(squad, memory_mod(), squad.zhopa2_target, reason or "revenge_day_expired")
+	update_debug(squad)
+	return true
+end
+
+function M.release_artifact_task(squad, reason)
+	local artifacts = artifacts_mod()
+	if artifacts and type(artifacts.release_reservation) == "function" then
+		artifacts.release_reservation(squad, reason or "artifact_task_clear")
+	end
+	if squad then
+		squad.zhopa2_artifact_id = nil
+		squad.zhopa2_artifact_section = nil
+		squad.zhopa2_artifact_collect_started = nil
+		squad.zhopa2_artifact_pickup_npc_id = nil
+	end
+	return true
+end
+
+function M.assign_next_task(squad, reason)
+	if not squad then
+		return
+	end
+	if not assignment_budget_open(squad) then
+		return
+	end
+	local choice = is_monster_squad(squad) and select_mutant_task(squad) or select_stalker_task(squad)
+	if not choice then
+		if mutant_night_hunt_only(squad) then
+			if not task_no_target_cooldown_active(squad, "HUNT") then
+				mark_task_no_target(squad, "HUNT")
+				squad.zhopa2_last_result = "hunt_no_target"
+			end
+			return
+		end
+		assign_rest(squad, reason or "fallback_rest")
+		return
+	end
+	assign_choice(squad, choice, reason)
+end
+
+function M.update_squad(squad, memory)
+	if not squad then
+		return false
+	end
+	local mem = memory or memory_mod()
+
+	if type(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
+		if squad.zhopa2_task and type(squad.zhopa2_clear_task) == "function" then
+			squad:zhopa2_clear_task("unmanaged")
+		end
+		return false
+	end
+
+	if pause_for_surge(squad) then
+		return false
+	end
+
+	if park_inactive_mutant(squad) then
+		return false
+	end
+
+	if repair_invalid_mutant_task(squad) then
+		return true
+	end
+
+	if type(squad.zhopa2_should_skip_budget) == "function" and squad:zhopa2_should_skip_budget() then
+		return squad.zhopa2_task ~= nil
+	end
+
+	if night_rest_target_unsafe(squad) then
+		local replacement = select_stalker_night_rest(squad)
+		if replacement and M.interrupt_task(squad, replacement.task, replacement.target, replacement.duration or 0, replacement.reason, replacement.patrol, {
+			clear_reason = "night_rest_target_unsafe",
+			result = "night_rest_reassigned",
+		}) then
+			return true
+		end
+		if type(squad.zhopa2_clear_task) == "function" then
+			squad:zhopa2_clear_task("night_rest_target_unsafe")
+		end
+		assign_rest(squad, "night_rest_target_unsafe")
+		return true
+	end
+
+	if squad.zhopa2_task == M.TASK_REVENGE and revenge_expired_by_night() then
+		complete_revenge(squad, mem, squad.zhopa2_target, "revenge_day_expired")
+		update_debug(squad)
+		return true
+	end
+
+	if squad.zhopa2_task and mutant_night_hunt_only(squad) and squad.zhopa2_task ~= M.TASK_HUNT and squad.zhopa2_task ~= M.TASK_REVENGE and squad.zhopa2_task ~= M.TASK_FORCE_EXIT and squad.zhopa2_task ~= M.TASK_BASE_CAMPING then
+		local hunt = build_mutant_hunt(squad)
+		if hunt and M.interrupt_task(squad, hunt.task, hunt.target, hunt.duration or 0, hunt.reason or "night_hunt_interrupt", hunt.patrol, {
+			clear_reason = "night_hunt_interrupt",
+			result = "night_hunt_assigned",
+		}) then
+			return true
+		end
+		if type(squad.zhopa2_clear_task) == "function" then
+			squad:zhopa2_clear_task("night_hunt_interrupt")
+		end
+		squad.zhopa2_last_result = "hunt_no_target"
+		update_debug(squad)
+		return false
+	end
+
+	if squad.zhopa2_task and squad.zhopa2_task ~= M.TASK_NIGHT_REST and squad.zhopa2_task ~= M.TASK_REVENGE and not is_monster_squad(squad) then
+		local night_rest = select_stalker_night_rest(squad)
+		if night_rest and M.interrupt_task(squad, night_rest.task, night_rest.target, night_rest.duration or 0, night_rest.reason, night_rest.patrol, {
+			snapshot = true,
+			snapshot_reason = "night_rest_interrupt",
+			clear_reason = "night_rest_interrupt",
+			result = "night_rest_assigned",
+		}) then
+			return true
+		end
+	end
+
+	if squad.zhopa2_task == M.TASK_HUNT then
+		local valid, hunt_reason = M.hunt_target_valid(squad)
+		if not valid then
+			if hunt_reason == "hunt_target_missing" or hunt_reason == "hunt_target_defeated" then
+				complete_hunt(squad, mem, squad.zhopa2_target, hunt_reason)
+			else
+				abort_hunt(squad, hunt_reason)
+			end
+			update_debug(squad)
+			return true
+		end
+		M.hunt_offline_tick(squad, alife_object(tonumber(squad.zhopa2_target) or squad.zhopa2_target))
+	end
+
+	if squad.zhopa2_task == M.TASK_REVENGE then
+		local valid, revenge_reason = M.revenge_target_valid(squad)
+		if not valid then
+			complete_revenge(squad, mem, squad.zhopa2_target, revenge_reason)
+			update_debug(squad)
+			return true
+		end
+		local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+		M.apply_revenge_hostility(squad)
+		if target_id ~= ACTOR_TARGET_ID then
+			M.hunt_offline_tick(squad, alife_object(target_id), { force = true, result = "revenge_offline_battle" })
+		end
+	end
+
+	if squad.zhopa2_task == M.TASK_ARTEFACT then
+		if type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target() then
+			local artifacts = artifacts_mod()
+			if artifacts and type(artifacts.try_collect) == "function" then
+				local done, artifact_reason = artifacts.try_collect(squad)
+				if done == true then
+					complete_artefact(squad, artifact_reason or "completed_ARTEFACT")
+					update_debug(squad)
+					return true
+				elseif done == false then
+					complete_artefact(squad, artifact_reason or "artifact_failed")
+					update_debug(squad)
+					return true
+				end
+				squad.zhopa2_last_reason = artifact_reason or "artifact_collect_wait"
+				update_debug(squad)
+				return true
+			end
+			complete_artefact(squad, "artifact_module_missing")
+			update_debug(squad)
+			return true
+		end
+	end
+
+	if squad.zhopa2_task and type(squad.zhopa2_target_is_alive) == "function" and not squad:zhopa2_target_is_alive() then
+		if squad.zhopa2_task == M.TASK_HUNT or squad.zhopa2_task == M.TASK_REVENGE then
+			if squad.zhopa2_task == M.TASK_REVENGE then
+				complete_revenge(squad, mem, squad.zhopa2_target, "revenge_target_missing")
+			else
+				complete_hunt(squad, mem, squad.zhopa2_target, "hunt_target_missing")
+			end
+			update_debug(squad)
+			return true
+		end
+		if type(squad.zhopa2_clear_task) == "function" then
+			squad:zhopa2_clear_task("lost_target")
+		end
+		assign_rest(squad, "lost_target")
+		return true
+	end
+
+	if squad.zhopa2_task and type(squad.zhopa2_task_completed) == "function" and squad:zhopa2_task_completed() then
+		local completed = squad.zhopa2_task
+		local completed_target = squad.zhopa2_target
+		if completed ~= M.TASK_REST and completed ~= M.TASK_HUNT and completed ~= M.TASK_REVENGE and mem and type(mem.add_recent_smart) == "function" then
+			mem.add_recent_smart(squad, completed_target)
+		end
+		if completed == M.TASK_HUNT then
+			complete_hunt(squad, mem, completed_target, "completed_HUNT")
+		elseif completed == M.TASK_REVENGE then
+			complete_revenge(squad, mem, completed_target, "completed_REVENGE")
+		elseif completed == M.TASK_POPULATE then
+			complete_populate(squad, completed_target)
+		else
+			if type(squad.zhopa2_clear_task) == "function" then
+				squad:zhopa2_clear_task("completed_" .. tostring(completed))
+			end
+			if completed == M.TASK_NIGHT_REST and mem and type(mem.resume_task) == "function" and mem.resume_task(squad, "resume_after_night_rest") then
+			-- resumed from memory
+			elseif completed == M.TASK_REST or completed == M.TASK_NIGHT_REST then
+				M.assign_next_task(squad, "after_" .. tostring(completed))
+			else
+				assign_rest(squad, "after_" .. tostring(completed))
+			end
+		end
+	elseif not squad.zhopa2_task then
+		M.assign_next_task(squad, "new_task")
+	end
+
+	update_debug(squad)
+	return squad.zhopa2_task ~= nil
+end
+
+local function revenge_script_target_fallback(squad, route_reason)
+	if squad then
+		squad.zhopa2_last_reason = route_reason or "revenge_wait_route"
+	end
+	return squad and (squad.assigned_target_id or squad.current_target_id or squad.id) or nil
+end
+
+function M.get_script_target(squad)
+	if not (squad and squad.zhopa2_task) then
+		return nil
+	end
+	if M.surge_active() then
+		return nil
+	end
+	if squad.zhopa2_task == M.TASK_REST then
+		return squad.id
+	end
+	if squad.zhopa2_task == M.TASK_HUNT then
+		local target = alife_object(tonumber(squad.zhopa2_target) or squad.zhopa2_target)
+		local p = perception()
+		if target and p and type(p.hunt_script_target) == "function" then
+			local script_target, route_reason = p.hunt_script_target(squad, target, { prey = hunt_prey_for(squad), allow_cross_level = true })
+			if script_target then
+				if route_reason == "hunt_route_smart" then
+					squad.zhopa2_last_reason = "hunt_route_smart"
+				elseif route_reason then
+					squad.zhopa2_last_reason = route_reason
+				end
+				return script_target
+			end
+		end
+		return nil
+	end
+	if squad.zhopa2_task == M.TASK_REVENGE then
+		local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+		if target_id == ACTOR_TARGET_ID then
+			local p = perception()
+			if p and type(p.actor_script_target) == "function" then
+				local script_target, route_reason = p.actor_script_target(squad, { allow_cross_level = true })
+				if script_target then
+					if route_reason == "actor_route_smart" then
+						squad.zhopa2_last_reason = "actor_route_smart"
+					elseif route_reason then
+						squad.zhopa2_last_reason = route_reason
+					end
+					return script_target
+				end
+				return revenge_script_target_fallback(squad, route_reason or "revenge_actor_wait_route")
+			end
+			return revenge_script_target_fallback(squad, "revenge_actor_wait_route")
+		end
+		local target = alife_object(target_id)
+		local p = perception()
+		if target and p and type(p.revenge_script_target) == "function" then
+			local script_target, route_reason = p.revenge_script_target(squad, target, { allow_cross_level = true })
+			if script_target then
+				if route_reason == "revenge_route_smart" then
+					squad.zhopa2_last_reason = "revenge_route_smart"
+				elseif route_reason then
+					squad.zhopa2_last_reason = route_reason
+				end
+				return script_target
+			end
+			return revenge_script_target_fallback(squad, route_reason or "revenge_target_wait_route")
+		end
+		return revenge_script_target_fallback(squad, "revenge_target_wait_route")
+	end
+	return tonumber(squad.zhopa2_target) or squad.zhopa2_target
+end
+
+_G.zhopa2_tasks = M
+return M

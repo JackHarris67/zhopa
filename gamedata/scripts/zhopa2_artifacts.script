@@ -1,0 +1,810 @@
+local M = {}
+
+local DEBUG_COOLDOWN_MS = 3000
+local ONLINE_PICKUP_STALL_TIMEOUT_MS = 45000
+local ONLINE_PICKUP_STALL_EPS_SQR = 0.01
+local ONLINE_PICKUP_INACTIVE_GRACE_MS = 5000
+local ONLINE_CONTEST_TIMEOUT_MS = 45000
+
+local function index_mod()
+	local idx = rawget(_G, "zhopa2_index")
+	if not idx and require then
+		pcall(require, "zhopa2_index")
+		idx = rawget(_G, "zhopa2_index")
+	end
+	return idx
+end
+
+local function perception_mod()
+	local p = rawget(_G, "zhopa2_perception")
+	if not p and require then
+		pcall(require, "zhopa2_perception")
+		p = rawget(_G, "zhopa2_perception")
+	end
+	return p
+end
+
+local function memory_mod()
+	local mem = rawget(_G, "zhopa2_memory")
+	if not mem and require then
+		pcall(require, "zhopa2_memory")
+		mem = rawget(_G, "zhopa2_memory")
+	end
+	return mem
+end
+
+local function loot_mod()
+	local loot = rawget(_G, "zhopa2_loot")
+	if not loot and require then
+		pcall(require, "zhopa2_loot")
+		loot = rawget(_G, "zhopa2_loot")
+	end
+	return loot
+end
+
+local function gather_mod()
+	local gather = rawget(_G, "xr_gather_items")
+	if not gather and type(load_module) == "function" then
+		gather = load_module("xr_gather_items")
+	end
+	if not gather and require then
+		pcall(require, "xr_gather_items")
+		gather = rawget(_G, "xr_gather_items")
+	end
+	return gather
+end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return obj
+	end
+	if obj.id ~= nil and type(obj.id) ~= "function" then
+		return obj.id
+	end
+	if type(obj.id) == "function" then
+		local ok, id = pcall(obj.id, obj)
+		return ok and id or nil
+	end
+	return obj.m_id
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.section) == "function" then
+		local ok, section = pcall(obj.section, obj)
+		if ok and section then
+			return section
+		end
+	end
+	if type(obj.section_name) == "function" then
+		local ok, section = pcall(obj.section_name, obj)
+		if ok and section then
+			return section
+		end
+	end
+	return obj.section_name or obj.section
+end
+
+local function object_clsid(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.clsid) == "function" then
+		local ok, cls = pcall(obj.clsid, obj)
+		return ok and cls or nil
+	end
+	return obj.clsid
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not (id and level and type(level.object_by_id) == "function") then
+		return nil
+	end
+	local ok, obj = pcall(level.object_by_id, id)
+	return ok and obj or nil
+end
+
+local function object_position(obj)
+	if not (obj and type(obj.position) == "function") then
+		return nil
+	end
+	local ok, pos = pcall(obj.position, obj)
+	return ok and pos or nil
+end
+
+local function object_is_artifact(obj)
+	local cls = object_clsid(obj)
+	return cls ~= nil and IsArtefact and IsArtefact(nil, cls) == true
+end
+
+local function item_cost(obj_or_section)
+	if not obj_or_section then
+		return 0
+	end
+	if type(obj_or_section) == "string" then
+		if ini_sys and ini_sys.r_float_ex then
+			local cost = ini_sys:r_float_ex(obj_or_section, "cost")
+			return tonumber(cost) or 0
+		end
+		return 0
+	end
+	if type(obj_or_section.Cost) == "function" then
+		local ok, value = pcall(obj_or_section.Cost, obj_or_section)
+		if ok and value then
+			return tonumber(value) or 0
+		end
+	end
+	return item_cost(object_section(obj_or_section))
+end
+
+local function artifact_valid(artifact_id)
+	artifact_id = tonumber(artifact_id) or artifact_id
+	local se_artifact = artifact_id and alife_object and alife_object(artifact_id) or nil
+	if se_artifact then
+		return tonumber(se_artifact.parent_id) == 65535 and object_is_artifact(se_artifact)
+	end
+	local obj = online_object_by_id(artifact_id)
+	return obj and object_is_artifact(obj) == true
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.name) == "function" then
+		local ok, name = pcall(obj.name, obj)
+		if ok and name then
+			return name
+		end
+	end
+	return object_section(obj) or object_id(obj)
+end
+
+local function named_id(id)
+	id = tonumber(id) or id
+	if not id then
+		return "-"
+	end
+	local obj = alife_object and alife_object(id) or nil
+	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id))
+end
+
+local function bool_text(value)
+	return value and "true" or "false"
+end
+
+local function artifact_bucket_debug(idx, smart_id, focus_id)
+	if not (idx and smart_id) then
+		return "smart_bucket=none"
+	end
+	local bucket = idx.smart_artifacts and idx.smart_artifacts[smart_id] or nil
+	local count = 0
+	local parts = {}
+	if bucket then
+		for artifact_id in pairs(bucket) do
+			count = count + 1
+			if #parts < 8 then
+				parts[#parts + 1] = string.format(
+					"%s:%s:valid=%s:reserved=%s%s",
+					tostring(artifact_id),
+					tostring(idx.artifact_section and idx.artifact_section[artifact_id] or "-"),
+					bool_text(artifact_valid(artifact_id)),
+					tostring(idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
+					tostring(artifact_id) == tostring(focus_id) and ":focus" or ""
+				)
+			end
+		end
+	end
+	local flags = idx.smart_task_flags and idx.smart_task_flags[smart_id] or nil
+	return string.format(
+		"smart_bucket smart=%s count=%s available=%s list=[%s]",
+		named_id(smart_id),
+		tostring(count),
+		bool_text(flags and flags.artefact_available == true),
+		#parts > 0 and table.concat(parts, ";") or "-"
+	)
+end
+
+local function artifact_pool_debug(idx)
+	if not idx then
+		return "artifact_pool=index_missing"
+	end
+	local total = 0
+	local valid = 0
+	local reserved = 0
+	for artifact_id in pairs(idx.artifacts or {}) do
+		total = total + 1
+		if artifact_valid(artifact_id) then
+			valid = valid + 1
+		end
+		if idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] then
+			reserved = reserved + 1
+		end
+	end
+	return string.format("artifact_pool total=%s valid=%s reserved=%s revision=%s", tostring(total), tostring(valid), tostring(reserved), tostring(idx.artifact_revision or "-"))
+end
+
+local function artifact_object_debug(idx, artifact_id)
+	artifact_id = tonumber(artifact_id)
+	if not artifact_id then
+		return "artifact id=-"
+	end
+	local se_artifact = alife_object and alife_object(artifact_id) or nil
+	local online = online_object_by_id(artifact_id)
+	return string.format(
+		"artifact id=%s section=%s expected_smart=%s zone=%s level=%s reserved_by=%s valid=%s server=%s online=%s parent=%s",
+		tostring(artifact_id),
+		tostring((idx and idx.artifact_section and idx.artifact_section[artifact_id]) or object_section(se_artifact) or object_section(online) or "-"),
+		named_id(idx and idx.artifact_smart and idx.artifact_smart[artifact_id] or nil),
+		tostring(idx and idx.artifact_zone and idx.artifact_zone[artifact_id] or "-"),
+		tostring(idx and idx.artifact_level and idx.artifact_level[artifact_id] or "-"),
+		tostring(idx and idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
+		bool_text(artifact_valid(artifact_id)),
+		bool_text(se_artifact ~= nil),
+		bool_text(online ~= nil),
+		tostring(se_artifact and se_artifact.parent_id or "-")
+	)
+end
+
+local function debug_artifact_error(squad, reason, artifact_id, npc, extra)
+	if type(printf) ~= "function" then
+		return
+	end
+	local now = time_global and time_global() or 0
+	local target_id = squad and (tonumber(squad.zhopa2_target) or squad.zhopa2_target) or nil
+	local key = string.format("%s|%s|%s|%s", tostring(reason), tostring(squad and squad.id or "-"), tostring(artifact_id or "-"), tostring(target_id or "-"))
+	if squad and squad.zhopa2_artifact_debug_key == key and now > 0 and (now - (tonumber(squad.zhopa2_artifact_debug_time) or 0)) < DEBUG_COOLDOWN_MS then
+		return
+	end
+	if squad then
+		squad.zhopa2_artifact_debug_key = key
+		squad.zhopa2_artifact_debug_time = now
+	end
+
+	local idx = index_mod()
+	local artifact_smart_id = idx and idx.artifact_smart and idx.artifact_smart[tonumber(artifact_id)] or nil
+	printf(
+		"~ ZHOPA2 artifact error | reason [%s] squad [%s:%s] faction [%s] task_target [%s] current_smart [%s] current_target [%s] assigned_target [%s] npc [%s:%s] extra [%s]",
+		tostring(reason or "-"),
+		tostring(squad and object_name(squad) or "-"),
+		tostring(squad and squad.id or "-"),
+		tostring(squad and squad.player_id or "-"),
+		named_id(target_id),
+		named_id(squad and squad.smart_id or nil),
+		named_id(squad and squad.current_target_id or nil),
+		named_id(squad and squad.assigned_target_id or nil),
+		tostring(npc and object_name(npc) or "-"),
+		tostring(npc and object_id(npc) or "-"),
+		tostring(extra or "-")
+	)
+	printf("~ ZHOPA2 artifact expected | %s", artifact_object_debug(idx, artifact_id))
+	printf("~ ZHOPA2 artifact smart pool | task_target [%s] artifact_smart [%s] %s", named_id(target_id), named_id(artifact_smart_id), artifact_bucket_debug(idx, target_id or artifact_smart_id, artifact_id))
+	printf("~ ZHOPA2 artifact registry | %s", artifact_pool_debug(idx))
+end
+
+local function squad_has_artifact_cargo(squad, artifact_id)
+	local idx = index_mod()
+	return idx and type(idx.squad_has_artifact_cargo) == "function" and idx.squad_has_artifact_cargo(squad, artifact_id) == true
+end
+
+local function squad_member_server(squad, prefer_id)
+	if not (squad and type(squad.squad_members) == "function") then
+		return nil
+	end
+	if prefer_id then
+		local preferred = alife_object and alife_object(prefer_id) or nil
+		if preferred then
+			return preferred
+		end
+	end
+	for member in squad:squad_members() do
+		local se_member = member and member.id and alife_object and alife_object(member.id) or nil
+		if se_member then
+			return se_member
+		end
+	end
+	return nil
+end
+
+local function squad_member_online_object(member)
+	local id = member and member.id or nil
+	if not id then
+		return nil
+	end
+	local storage = db and db.storage and db.storage[id] or nil
+	if storage and storage.object then
+		return storage.object
+	end
+	return online_object_by_id(id)
+end
+
+local function squad_member_alive_online(obj)
+	if not (obj and type(obj.alive) == "function") then
+		return false
+	end
+	local ok, alive = pcall(obj.alive, obj)
+	return ok and alive == true
+end
+
+local function add_online_looter(list, seen, obj)
+	local id = object_id(obj)
+	if id and not seen[id] and squad_member_alive_online(obj) then
+		seen[id] = true
+		list[#list + 1] = obj
+	end
+end
+
+local function squad_online_looters(squad, prefer_id)
+	local list = {}
+	local seen = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return list
+	end
+	if prefer_id then
+		add_online_looter(list, seen, online_object_by_id(prefer_id))
+	end
+	local commander_id = type(squad.commander_id) == "function" and squad:commander_id() or nil
+	if commander_id then
+		add_online_looter(list, seen, online_object_by_id(commander_id))
+	end
+	for member in squad:squad_members() do
+		add_online_looter(list, seen, squad_member_online_object(member))
+	end
+	return list
+end
+
+local function release_artifact_reservation(squad, reason)
+	local idx = index_mod()
+	if idx and type(idx.release_artifact_reservation) == "function" then
+		return idx.release_artifact_reservation(squad, reason or "artifact_release")
+	end
+	return false
+end
+
+local function add_artifact_cargo(squad, section, value, artifact_id, reason)
+	local mem = memory_mod()
+	if mem and type(mem.add_artifact_cargo) == "function" then
+		mem.add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_collect")
+	end
+	local idx = index_mod()
+	if idx and type(idx.add_artifact_cargo) == "function" then
+		idx.add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_collect")
+	end
+end
+
+local function reset_online_target_tracking(squad)
+	if not squad then
+		return
+	end
+	squad.zhopa2_artifact_force_owner = nil
+	squad.zhopa2_artifact_force_item = nil
+	squad.zhopa2_artifact_force_since = nil
+	squad.zhopa2_artifact_force_attempts = nil
+end
+
+local current_artifact_id
+
+local function artifact_from_task_smart(squad)
+	local idx = index_mod()
+	local smart_id = tonumber(squad and squad.zhopa2_target)
+	local bucket = idx and smart_id and idx.smart_artifacts and idx.smart_artifacts[smart_id] or nil
+	if not bucket then
+		return nil
+	end
+	for artifact_id in pairs(bucket) do
+		if artifact_valid(artifact_id) then
+			return tonumber(artifact_id) or artifact_id
+		end
+	end
+	return nil
+end
+
+local function recover_task_artifact_id(squad)
+	local artifact_id = current_artifact_id(squad)
+	if artifact_id then
+		return artifact_id
+	end
+	artifact_id = artifact_from_task_smart(squad)
+	if not artifact_id then
+		return nil
+	end
+	local idx = index_mod()
+	squad.zhopa2_artifact_id = artifact_id
+	squad.zhopa2_artifact_smart = idx and idx.artifact_smart and idx.artifact_smart[artifact_id] or tonumber(squad.zhopa2_target)
+	squad.zhopa2_artifact_zone = idx and idx.artifact_zone and idx.artifact_zone[artifact_id] or nil
+	squad.zhopa2_artifact_section = idx and idx.artifact_section and idx.artifact_section[artifact_id] or nil
+	if idx and idx.squad_artifact_reservation and squad.id then
+		idx.squad_artifact_reservation[squad.id] = artifact_id
+	end
+	return artifact_id
+end
+
+local function cancel_online_pickup(squad)
+	local loot = loot_mod()
+	if not (loot and type(loot.cancel_item_pickup) == "function") then
+		return false
+	end
+	local artifact_id = recover_task_artifact_id(squad)
+	loot.cancel_item_pickup(squad and squad.zhopa2_artifact_pickup_npc_id or nil, artifact_id)
+	return true
+end
+
+local function clear_online_pickup_state(squad)
+	if not squad then
+		return
+	end
+	squad.zhopa2_artifact_collect_started = nil
+	squad.zhopa2_artifact_pickup_npc_id = nil
+	squad.zhopa2_artifact_contested_since = nil
+	squad.zhopa2_artifact_pickup_last_x = nil
+	squad.zhopa2_artifact_pickup_last_y = nil
+	squad.zhopa2_artifact_pickup_last_z = nil
+	squad.zhopa2_artifact_pickup_stall_since = nil
+end
+
+local function gather_item_active(npc, artifact_id)
+	local gather = gather_mod()
+	local active = gather and gather.zhopa2_gather_item_active or rawget(_G, "zhopa2_gather_item_active")
+	if type(active) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(active, npc, artifact_id)
+	return ok and result == true or false
+end
+
+local function gather_item_failure_reason(npc, artifact_id)
+	local gather = gather_mod()
+	local failure = gather and gather.zhopa2_gather_item_failure_reason or rawget(_G, "zhopa2_gather_item_failure_reason")
+	if type(failure) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(failure, npc, artifact_id)
+	return ok and result or nil
+end
+
+local function gather_item_debug_status(npc, artifact_id)
+	local gather = gather_mod()
+	local debug_status = gather and gather.zhopa2_gather_item_debug_status or rawget(_G, "zhopa2_gather_item_debug_status")
+	if type(debug_status) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(debug_status, npc, artifact_id)
+	return ok and result or nil
+end
+
+local function pickup_stalled(squad, npc, now)
+	if not (squad and npc and now and now > 0) then
+		return false, nil
+	end
+	local pos = object_position(npc)
+	local x = pos and tonumber(pos.x) or nil
+	local y = pos and tonumber(pos.y) or nil
+	local z = pos and tonumber(pos.z) or nil
+	if not (x and y and z) then
+		return false, nil
+	end
+
+	local last_x = tonumber(squad.zhopa2_artifact_pickup_last_x)
+	local last_y = tonumber(squad.zhopa2_artifact_pickup_last_y)
+	local last_z = tonumber(squad.zhopa2_artifact_pickup_last_z)
+	if not (last_x and last_y and last_z) then
+		squad.zhopa2_artifact_pickup_last_x = x
+		squad.zhopa2_artifact_pickup_last_y = y
+		squad.zhopa2_artifact_pickup_last_z = z
+		squad.zhopa2_artifact_pickup_stall_since = nil
+		return false, nil
+	end
+
+	local dx = x - last_x
+	local dy = y - last_y
+	local dz = z - last_z
+	local moved_sqr = dx * dx + dy * dy + dz * dz
+	if moved_sqr > ONLINE_PICKUP_STALL_EPS_SQR then
+		squad.zhopa2_artifact_pickup_last_x = x
+		squad.zhopa2_artifact_pickup_last_y = y
+		squad.zhopa2_artifact_pickup_last_z = z
+		squad.zhopa2_artifact_pickup_stall_since = nil
+		return false, nil
+	end
+
+	local stall_since = tonumber(squad.zhopa2_artifact_pickup_stall_since)
+	if not stall_since then
+		squad.zhopa2_artifact_pickup_stall_since = now
+		return false, nil
+	end
+	local stalled_for = now - stall_since
+	if stalled_for > ONLINE_PICKUP_STALL_TIMEOUT_MS then
+		return true, "pickup_stalled:" .. tostring(stalled_for)
+	end
+	return false, nil
+end
+
+local function online_pickup_pending(squad, artifact_id)
+	local npc_id = tonumber(squad and squad.zhopa2_artifact_pickup_npc_id)
+	local started = tonumber(squad and squad.zhopa2_artifact_collect_started)
+	if not (npc_id and started and started > 0) then
+		return false, "no_pending"
+	end
+	local now = now_ms()
+	local npc = online_object_by_id(npc_id)
+	if not npc then
+		return false, "pickup_npc_offline"
+	end
+	if type(npc.alive) == "function" then
+		local ok, alive = pcall(npc.alive, npc)
+		if ok and alive == false then
+			return false, "pickup_npc_dead"
+		end
+	end
+	local active = gather_item_active(npc, artifact_id)
+	local failure_reason = gather_item_failure_reason(npc, artifact_id)
+	if failure_reason then
+		return false, "pickup_" .. tostring(failure_reason)
+	end
+	if active == false and now > 0 and (now - started) > ONLINE_PICKUP_INACTIVE_GRACE_MS then
+		return false, "pickup_not_active"
+	end
+	local stalled, stall_reason = pickup_stalled(squad, npc, now)
+	if stalled then
+		return false, active == false and ("pickup_not_active_" .. tostring(stall_reason)) or stall_reason
+	end
+	return true, "pickup_pending"
+end
+
+current_artifact_id = function(squad)
+	local idx = index_mod()
+	return tonumber(squad and squad.zhopa2_artifact_id)
+		or (idx and idx.squad_artifact_reservation and squad and tonumber(idx.squad_artifact_reservation[squad.id]))
+end
+
+local function online_artifact_pickup_ready(squad, artifact_id)
+	if squad.online ~= true then
+		return false, {}, "squad_offline"
+	end
+	if not online_object_by_id(artifact_id) then
+		return false, {}, "artifact_offline"
+	end
+	local looters = squad_online_looters(squad, squad.zhopa2_artifact_pickup_npc_id)
+	if #looters <= 0 then
+		return false, looters, "looters_offline"
+	end
+	return true, looters, "online_ready"
+end
+
+local function all_failures_contested(failures)
+	if not failures or #failures <= 0 then
+		return false
+	end
+	for i = 1, #failures do
+		if not string.find(tostring(failures[i]), "force_reserved_by", 1, true) then
+			return false
+		end
+	end
+	return true
+end
+
+local function call_parent_zone_take(se_artifact)
+	local artifact_id = object_id(se_artifact)
+	local zone = artifact_id and parent_zones_by_artefact_id and parent_zones_by_artefact_id[artifact_id] or nil
+	if zone and type(zone.on_artefact_take) == "function" then
+		pcall(zone.on_artefact_take, zone, se_artifact)
+		return true
+	end
+	local idx = index_mod()
+	if idx and type(idx.unregister_artifact) == "function" then
+		idx.unregister_artifact(artifact_id, "artifact_offline_take")
+	end
+	return false
+end
+
+local function release_ground_artifact(se_artifact)
+	if not (se_artifact and alife_release) then
+		return false
+	end
+	local ok = pcall(function()
+		alife_release(se_artifact)
+	end)
+	return ok
+end
+
+function M.release_reservation(squad, reason)
+	return release_artifact_reservation(squad, reason)
+end
+
+function M.pick_target(squad, opts)
+	if not (squad and squad.id) then
+		return nil
+	end
+	local idx = index_mod()
+	local p = perception_mod()
+	if not (idx and type(idx.reserve_artifact_for_squad) == "function" and p and type(p.pick_artifact_target) == "function") then
+		debug_artifact_error(squad, "artifact_pick_deps_missing", current_artifact_id(squad), nil, string.format("index=%s perception=%s", tostring(idx ~= nil), tostring(p ~= nil)))
+		return nil
+	end
+
+	local reserved_id = current_artifact_id(squad)
+	if reserved_id and artifact_valid(reserved_id) then
+		local smart_id = idx.artifact_smart and idx.artifact_smart[reserved_id] or nil
+		local smart = smart_id and alife_object and alife_object(smart_id) or nil
+		if smart then
+			return {
+				smart = smart,
+				artifact_id = reserved_id,
+				section = idx.artifact_section and idx.artifact_section[reserved_id] or nil,
+				reason = "artefact_reserved",
+			}
+		end
+		debug_artifact_error(squad, "artifact_reserved_smart_missing", reserved_id, nil, string.format("smart_id=%s", tostring(smart_id or "-")))
+	end
+
+	local entry = p.pick_artifact_target(squad, opts or {})
+	if not (entry and entry.smart and entry.artifact_id) then
+		return nil
+	end
+	if not idx.reserve_artifact_for_squad(squad, entry.artifact_id) then
+		debug_artifact_error(squad, "artifact_reserve_failed", entry.artifact_id, nil, string.format("smart=%s", tostring(object_id(entry.smart) or "-")))
+		return nil
+	end
+	entry.reason = entry.reason or "artefact_available"
+	return entry
+end
+
+function M.offline_collect(squad, artifact_id, reason)
+	artifact_id = tonumber(artifact_id)
+	local se_artifact = artifact_id and alife_object and alife_object(artifact_id) or nil
+	if not (squad and se_artifact and artifact_valid(artifact_id)) then
+		-- debug_artifact_error(squad, "artifact_missing", artifact_id, nil, reason or "offline_collect")
+		release_artifact_reservation(squad, "artifact_offline_missing")
+		return false, "artifact_missing"
+	end
+
+	local section = object_section(se_artifact)
+	local se_looter = squad_member_server(squad, squad.commander_id and squad:commander_id() or nil)
+	if not (section and se_looter) then
+		-- debug_artifact_error(squad, "artifact_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-")))
+		return false, "artifact_no_looter"
+	end
+
+	local value = item_cost(se_artifact)
+	local se_new = alife_create_item(section, se_looter)
+	local new_id = object_id(se_new)
+	if not (se_new and new_id and alife_object and alife_object(new_id)) then
+		-- debug_artifact_error(squad, "artifact_create_failed", artifact_id, nil, string.format("section=%s looter=%s new_id=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-"), tostring(new_id or "-")))
+		return false, "artifact_create_failed"
+	end
+
+	call_parent_zone_take(se_artifact)
+	release_ground_artifact(se_artifact)
+	add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_offline_collect")
+	release_artifact_reservation(squad, "artifact_offline_collected")
+	reset_online_target_tracking(squad)
+	squad.zhopa2_last_result = "artifact_offline_collected"
+	return true, "artifact_offline_collected"
+end
+
+function M.try_collect(squad)
+	if not (squad and squad.zhopa2_task == "ARTEFACT") then
+		return false, "artifact_not_active"
+	end
+
+	local artifact_id = recover_task_artifact_id(squad)
+	if not artifact_id then
+		if squad.online == true then
+			debug_artifact_error(squad, "artifact_no_target", nil, nil, "current_artifact_id=nil")
+		end
+		return false, "artifact_no_target"
+	end
+	if squad_has_artifact_cargo(squad, artifact_id) then
+		release_artifact_reservation(squad, "artifact_collected")
+		return true, "artifact_collected"
+	end
+	if not artifact_valid(artifact_id) then
+		if squad_has_artifact_cargo(squad, artifact_id) then
+			release_artifact_reservation(squad, "artifact_collected")
+			return true, "artifact_collected"
+		end
+		if squad.online == true then
+			debug_artifact_error(squad, "artifact_missing", artifact_id, nil, "artifact_valid=false")
+		end
+		release_artifact_reservation(squad, "artifact_missing")
+		return false, "artifact_missing"
+	end
+
+	local online_ready, looters, online_reason = online_artifact_pickup_ready(squad, artifact_id)
+	if online_ready then
+		local pending, pending_reason = online_pickup_pending(squad, artifact_id)
+		if pending then
+			squad.zhopa2_last_result = "artifact_online_pickup_requested"
+			return nil, squad.zhopa2_last_result
+		elseif pending_reason ~= "no_pending" then
+			local pending_npc = online_object_by_id(squad.zhopa2_artifact_pickup_npc_id)
+			local pending_extra = tostring(pending_reason)
+			local gather_debug = gather_item_debug_status(pending_npc, artifact_id)
+			if gather_debug then
+				pending_extra = pending_extra .. " " .. tostring(gather_debug)
+			end
+			cancel_online_pickup(squad)
+			clear_online_pickup_state(squad)
+			if string.find(tostring(pending_reason), "pickup_stalled", 1, true) then
+				debug_artifact_error(squad, "artifact_online_pickup_stalled", artifact_id, pending_npc, pending_extra)
+				return false, "artifact_online_pickup_stalled"
+			end
+			if string.find(tostring(pending_reason), "pickup_approach", 1, true) or string.find(tostring(pending_reason), "pickup_no_approach", 1, true) then
+				debug_artifact_error(squad, "artifact_online_pickup_unreachable", artifact_id, pending_npc, pending_extra)
+				return false, "artifact_online_pickup_unreachable"
+			end
+		end
+
+		local loot = loot_mod()
+		if not (loot and type(loot.request_item_pickup) == "function") then
+			debug_artifact_error(squad, "artifact_online_no_looter", artifact_id, nil, loot and online_reason or "loot_missing")
+			squad.zhopa2_last_result = "artifact_online_wait_pickup"
+			return nil, squad.zhopa2_last_result
+		end
+		local request_failures = {}
+		for _, npc in ipairs(looters) do
+			local ok, request_reason = loot.request_item_pickup(npc, artifact_id, "artifact_task")
+			if ok then
+				squad.zhopa2_artifact_collect_started = time_global and time_global() or nil
+				squad.zhopa2_artifact_pickup_npc_id = object_id(npc)
+				squad.zhopa2_artifact_contested_since = nil
+				squad.zhopa2_artifact_pickup_last_x = nil
+				squad.zhopa2_artifact_pickup_last_y = nil
+				squad.zhopa2_artifact_pickup_last_z = nil
+				squad.zhopa2_artifact_pickup_stall_since = nil
+				squad.zhopa2_last_result = "artifact_online_pickup_requested"
+				return nil, squad.zhopa2_last_result
+			end
+			request_failures[#request_failures + 1] = string.format("%s:%s", tostring(object_id(npc) or "-"), tostring(request_reason or "-"))
+		end
+		if all_failures_contested(request_failures) then
+			local now = now_ms()
+			squad.zhopa2_artifact_contested_since = squad.zhopa2_artifact_contested_since or now
+			if now <= 0 or (now - (tonumber(squad.zhopa2_artifact_contested_since) or now)) < ONLINE_CONTEST_TIMEOUT_MS then
+				squad.zhopa2_last_result = "artifact_online_contested"
+				return nil, squad.zhopa2_last_result
+			end
+			debug_artifact_error(squad, "artifact_online_contested_timeout", artifact_id, looters[1], table.concat(request_failures, ";"))
+			clear_online_pickup_state(squad)
+			return false, "artifact_online_contested_timeout"
+		end
+		squad.zhopa2_artifact_contested_since = nil
+		debug_artifact_error(squad, "artifact_online_request_failed", artifact_id, looters[1], table.concat(request_failures, ";"))
+		squad.zhopa2_last_result = "artifact_online_wait_pickup"
+		return nil, squad.zhopa2_last_result
+	end
+
+	return M.offline_collect(squad, artifact_id, "artifact_offline_collect:" .. tostring(online_reason or "offline"))
+end
+
+function M.complete(squad, reason)
+	if squad then
+		cancel_online_pickup(squad)
+		clear_online_pickup_state(squad)
+		reset_online_target_tracking(squad)
+	end
+	return release_artifact_reservation(squad, reason or "artifact_complete")
+end
+
+_G.zhopa2_artifacts = M
+
+function M.on_game_start()
+	-- Online artifact pickup is requested lazily after the squad reaches
+	-- the artifact smart; xr_gather_items still owns the actual pickup action.
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+return M

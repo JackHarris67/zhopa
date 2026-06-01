@@ -1,0 +1,113 @@
+local MCM_SCHEMA = {}
+
+local OPTION_DEFS = {
+	enabled = { type = "check", val = 1, def = true },
+	stalker_movement_enabled = { type = "check", val = 1, def = true },
+	mutant_movement_enabled = { type = "check", val = 1, def = true },
+	debug_hud_enabled = { type = "check", val = 1, def = false },
+	explore_enabled = { type = "check", val = 1, def = true },
+	populate_enabled = { type = "check", val = 1, def = true },
+	base_camping_enabled = { type = "check", val = 1, def = true },
+	patrol_enabled = { type = "check", val = 1, def = true },
+	night_rest_enabled = { type = "check", val = 1, def = true },
+	stalker_hunt_enabled = { type = "check", val = 1, def = true },
+	revenge_enabled = { type = "check", val = 1, def = true },
+	revenge_actor_enabled = { type = "check", val = 1, def = true },
+	revenge_actor_chance = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 10 },
+	artefact_enabled = { type = "check", val = 1, def = false },
+	rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
+	patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
+	rest_fallback_stay_min_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 900 },
+	rest_fallback_stay_max_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 1800 },
+	mutant_explore_enabled = { type = "check", val = 1, def = true },
+	mutant_hunt_enabled = { type = "check", val = 1, def = true },
+	mutant_patrol_enabled = { type = "check", val = 1, def = true },
+	hunt_offline_combat_enabled = { type = "check", val = 1, def = true },
+	hunt_offline_combat_interval_sec = { type = "track", val = 2, min = 5, max = 180, step = 5, def = 30 },
+	hunt_offline_combat_distance = { type = "track", val = 2, min = 5, max = 100, step = 5, def = 25 },
+	stalker_explore_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 40 },
+	stalker_populate_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 20 },
+	stalker_patrol_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 25 },
+	stalker_hunt_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 15 },
+	stalker_artefact_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 10 },
+	mutant_hunt_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 35 },
+	mutant_patrol_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 30 },
+	mutant_explore_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 35 },
+	mutant_rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
+	mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
+	target_sync_enabled = { type = "check", val = 1, def = true },
+	online_intent_enforce_enabled = { type = "check", val = 1, def = true },
+	smart_tasks_enabled = { type = "check", val = 1, def = false },
+	story_events_enabled = { type = "check", val = 1, def = false },
+	story_psy_watchdog_enabled = { type = "check", val = 1, def = false },
+	trade_enabled = { type = "check", val = 1, def = false },
+	service_filler_enabled = { type = "check", val = 1, def = true },
+	loot_enabled = { type = "check", val = 1, def = true },
+}
+
+local PANELS = {
+	{
+		id = "general",
+		text = "ui_mcm_zhopa2_panel_general",
+		["groups"] = {
+			{ id = "core", text = "ui_mcm_zhopa2_group_core", options = { "enabled", "stalker_movement_enabled", "mutant_movement_enabled", "debug_hud_enabled" } },
+			{ id = "systems", text = "ui_mcm_zhopa2_group_systems", options = { "service_filler_enabled", "loot_enabled" } },
+		},
+	},
+	{
+		id = "tasks",
+		text = "ui_mcm_zhopa2_panel_tasks",
+		["groups"] = {
+			{ id = "roam", text = "ui_mcm_zhopa2_group_roam", options = { "explore_enabled", "populate_enabled", "base_camping_enabled", "patrol_enabled", "night_rest_enabled", "stalker_hunt_enabled", "artefact_enabled" } },
+			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "stalker_explore_weight", "stalker_populate_weight", "stalker_patrol_weight", "stalker_hunt_weight", "stalker_artefact_weight" } },
+			{ id = "timing", text = "ui_mcm_zhopa2_group_timing", options = { "rest_duration_game_hours", "patrol_duration_game_hours", "rest_fallback_stay_min_sec", "rest_fallback_stay_max_sec" } },
+			{ id = "targeting", text = "ui_mcm_zhopa2_group_targeting", options = { "target_sync_enabled", "online_intent_enforce_enabled", "revenge_enabled", "revenge_actor_enabled", "revenge_actor_chance", "hunt_offline_combat_enabled", "hunt_offline_combat_interval_sec", "hunt_offline_combat_distance" } },
+		},
+	},
+	{
+		id = "mutants",
+		text = "ui_mcm_zhopa2_panel_mutants",
+		["groups"] = {
+			{ id = "movement", text = "ui_mcm_zhopa2_group_mutants_movement", options = { "mutant_explore_enabled", "mutant_hunt_enabled", "mutant_patrol_enabled" } },
+			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "mutant_hunt_weight", "mutant_patrol_weight", "mutant_explore_weight" } },
+			{ id = "timing", text = "ui_mcm_zhopa2_group_mutants_timing", options = { "mutant_rest_duration_game_hours", "mutant_patrol_duration_game_hours" } },
+		},
+	},
+	{
+		id = "deferred",
+		text = "ui_mcm_zhopa2_panel_deferred",
+		["groups"] = {
+			{ id = "smart", text = "ui_mcm_zhopa2_group_deferred_smart", options = { "smart_tasks_enabled" } },
+			{ id = "story", text = "ui_mcm_zhopa2_group_deferred_story", options = { "story_events_enabled", "story_psy_watchdog_enabled" } },
+			{ id = "systems", text = "ui_mcm_zhopa2_group_deferred_systems", options = { "trade_enabled" } },
+		},
+	},
+}
+
+local PATH_BY_KEY = {}
+
+for i = 1, #PANELS do
+	local panel = PANELS[i]
+	for j = 1, #panel.groups do
+		local group = panel.groups[j]
+		for k = 1, #group.options do
+			local key = group.options[k]
+			PATH_BY_KEY[key] = "zhopa2/" .. panel.id .. "/" .. key
+		end
+	end
+end
+
+function get_path(key)
+	return PATH_BY_KEY[key]
+end
+
+function get_option(key)
+	return OPTION_DEFS[key]
+end
+
+MCM_SCHEMA.options = OPTION_DEFS
+MCM_SCHEMA.panels = PANELS
+MCM_SCHEMA.path_by_key = PATH_BY_KEY
+MCM_SCHEMA.get_path = get_path
+MCM_SCHEMA.get_option = get_option
+_G.zhopa2_mcm_schema = MCM_SCHEMA

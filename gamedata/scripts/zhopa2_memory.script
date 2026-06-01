@@ -1,0 +1,330 @@
+local M = {}
+
+local VERSION = 7
+local MARKER_START = "zhopa2_squad"
+local MARKER_END = "zhopa2_squad_end"
+local NIL = "nil"
+local BASE_FIELD_COUNT = 8
+local FIELD_COUNT = 25
+local RECENT_LIMIT = 8
+
+local function write_string(packet, value)
+	packet:w_stringZ(value ~= nil and tostring(value) or NIL)
+end
+
+local function read_string(packet)
+	local value = packet:r_stringZ()
+	if value == NIL then
+		return nil
+	end
+	return value
+end
+
+local function index_mod()
+	local idx = rawget(_G, "zhopa2_index")
+	if not idx and require then
+		pcall(require, "zhopa2_index")
+		idx = rawget(_G, "zhopa2_index")
+	end
+	return idx
+end
+
+function M.reset_squad(squad)
+	if not squad then
+		return
+	end
+	squad.zhopa2_task = nil
+	squad.zhopa2_target = nil
+	squad.zhopa2_started = nil
+	squad.zhopa2_until = nil
+	squad.zhopa2_patrol = nil
+	squad.zhopa2_patrol_idx = nil
+	squad.zhopa2_last_reason = nil
+	squad.zhopa2_last_result = nil
+	squad.zhopa2_managed = false
+	squad.zhopa2_resume_task = nil
+	squad.zhopa2_resume_target = nil
+	squad.zhopa2_resume_until = nil
+	squad.zhopa2_resume_patrol = nil
+	squad.zhopa2_resume_patrol_idx = nil
+	squad.zhopa2_resume_reason = nil
+	squad.zhopa2_recent_smarts = nil
+	squad.zhopa2_recent_targets = nil
+	squad.zhopa2_loot_count = 0
+	squad.zhopa2_loot_value = 0
+	squad.zhopa2_artifact_cargo_count = 0
+	squad.zhopa2_artifact_cargo_value = 0
+	squad.zhopa2_artifact_cargo_sections = nil
+	squad.zhopa2_artifact_cargo_last_id = nil
+	squad.zhopa2_artifact_id = nil
+	squad.zhopa2_artifact_section = nil
+	squad.zhopa2_artifact_collect_started = nil
+	squad.zhopa2_state_version = VERSION
+end
+
+local function pack_recent(values)
+	local out = {}
+	local seen = {}
+	for i = 1, #values do
+		local value = tonumber(values[i])
+		if value and not seen[value] then
+			seen[value] = true
+			out[#out + 1] = tostring(value)
+			if #out >= RECENT_LIMIT then
+				break
+			end
+		end
+	end
+	return table.concat(out, ",")
+end
+
+local function unpack_recent(value)
+	local out = {}
+	if type(value) ~= "string" or value == "" then
+		return out
+	end
+	local parts = str_explode(value, ",")
+	for i = 1, #parts do
+		local id = tonumber(parts[i])
+		if id then
+			out[#out + 1] = id
+		end
+	end
+	return out
+end
+
+function M.add_recent_smart(squad, smart_id)
+	if not (squad and smart_id) then
+		return
+	end
+	local values = unpack_recent(squad.zhopa2_recent_smarts)
+	table.insert(values, 1, smart_id)
+	squad.zhopa2_recent_smarts = pack_recent(values)
+end
+
+function M.recent_has_smart(squad, smart_id)
+	if not (squad and smart_id) then
+		return false
+	end
+	local values = unpack_recent(squad.zhopa2_recent_smarts)
+	smart_id = tonumber(smart_id)
+	for i = 1, #values do
+		if values[i] == smart_id then
+			return true
+		end
+	end
+	return false
+end
+
+function M.add_recent_target(squad, target_id)
+	if not (squad and target_id) then
+		return
+	end
+	local values = unpack_recent(squad.zhopa2_recent_targets)
+	table.insert(values, 1, target_id)
+	squad.zhopa2_recent_targets = pack_recent(values)
+end
+
+function M.recent_has_target(squad, target_id)
+	if not (squad and target_id) then
+		return false
+	end
+	local values = unpack_recent(squad.zhopa2_recent_targets)
+	target_id = tonumber(target_id)
+	for i = 1, #values do
+		if values[i] == target_id then
+			return true
+		end
+	end
+	return false
+end
+
+function M.add_loot_value(squad, value, reason)
+	if not squad then
+		return false
+	end
+	value = math.max(0, tonumber(value) or 0)
+	squad.zhopa2_loot_count = (tonumber(squad.zhopa2_loot_count) or 0) + 1
+	squad.zhopa2_loot_value = (tonumber(squad.zhopa2_loot_value) or 0) + value
+	squad.zhopa2_last_result = reason or "loot_value"
+	return true
+end
+
+function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
+	if not squad then
+		return false
+	end
+	value = math.max(0, tonumber(value) or 0)
+	squad.zhopa2_artifact_cargo_count = (tonumber(squad.zhopa2_artifact_cargo_count) or 0) + 1
+	squad.zhopa2_artifact_cargo_value = (tonumber(squad.zhopa2_artifact_cargo_value) or 0) + value
+	if section then
+		local existing = squad.zhopa2_artifact_cargo_sections
+		squad.zhopa2_artifact_cargo_sections = existing and existing ~= "" and (existing .. "," .. tostring(section)) or tostring(section)
+	end
+	squad.zhopa2_artifact_cargo_last_id = tonumber(artifact_id) or squad.zhopa2_artifact_cargo_last_id
+	squad.zhopa2_last_result = reason or "artifact_cargo"
+	return true
+end
+
+function M.snapshot_task(squad, reason)
+	if not (squad and squad.zhopa2_task and squad.zhopa2_target) then
+		return false
+	end
+	if squad.zhopa2_task == "NIGHT_REST" and reason ~= "revenge_interrupt" then
+		return false
+	end
+	squad.zhopa2_resume_task = squad.zhopa2_task
+	squad.zhopa2_resume_target = squad.zhopa2_target
+	squad.zhopa2_resume_until = squad.zhopa2_until
+	squad.zhopa2_resume_patrol = squad.zhopa2_patrol
+	squad.zhopa2_resume_patrol_idx = squad.zhopa2_patrol_idx
+	squad.zhopa2_resume_reason = reason or squad.zhopa2_last_reason
+	return true
+end
+
+function M.clear_resume(squad)
+	if not squad then
+		return
+	end
+	squad.zhopa2_resume_task = nil
+	squad.zhopa2_resume_target = nil
+	squad.zhopa2_resume_until = nil
+	squad.zhopa2_resume_patrol = nil
+	squad.zhopa2_resume_patrol_idx = nil
+	squad.zhopa2_resume_reason = nil
+end
+
+function M.resume_task(squad, reason)
+	if not (squad and squad.zhopa2_resume_task and squad.zhopa2_resume_target) then
+		return false
+	end
+	local target = tonumber(squad.zhopa2_resume_target)
+	if target and alife_object and not alife_object(target) then
+		M.clear_resume(squad)
+		squad.zhopa2_last_result = "resume_target_missing"
+		return false
+	end
+	if type(squad.zhopa2_assign_task) ~= "function" then
+		return false
+	end
+	squad:zhopa2_assign_task(
+		squad.zhopa2_resume_task,
+		target or squad.zhopa2_resume_target,
+		tonumber(squad.zhopa2_resume_until) or 0,
+		reason or "resume",
+		squad.zhopa2_resume_patrol
+	)
+	if squad.zhopa2_resume_patrol_idx then
+		squad.zhopa2_patrol_idx = tonumber(squad.zhopa2_resume_patrol_idx) or squad.zhopa2_patrol_idx
+	end
+	M.clear_resume(squad)
+	return true
+end
+
+function M.write_squad(packet, squad)
+	packet:w_stringZ(MARKER_START)
+	packet:w_stringZ(tostring(VERSION))
+	packet:w_stringZ(tostring(FIELD_COUNT))
+	write_string(packet, squad and squad.zhopa2_task)
+	write_string(packet, squad and squad.zhopa2_target)
+	utils_data.w_CTime(packet, squad and squad.zhopa2_started, "zhopa2_memory.zhopa2_started")
+	write_string(packet, squad and squad.zhopa2_until)
+	write_string(packet, squad and squad.zhopa2_patrol)
+	write_string(packet, squad and squad.zhopa2_patrol_idx)
+	write_string(packet, squad and squad.zhopa2_last_reason)
+	write_string(packet, squad and squad.zhopa2_managed == true and "true" or "false")
+	write_string(packet, squad and squad.zhopa2_resume_task)
+	write_string(packet, squad and squad.zhopa2_resume_target)
+	write_string(packet, squad and squad.zhopa2_resume_until)
+	write_string(packet, squad and squad.zhopa2_resume_patrol)
+	write_string(packet, squad and squad.zhopa2_resume_patrol_idx)
+	write_string(packet, squad and squad.zhopa2_resume_reason)
+	write_string(packet, squad and squad.zhopa2_recent_smarts)
+	write_string(packet, squad and squad.zhopa2_last_result)
+	write_string(packet, squad and squad.zhopa2_recent_targets)
+	write_string(packet, squad and squad.zhopa2_loot_count)
+	write_string(packet, squad and squad.zhopa2_loot_value)
+	write_string(packet, squad and squad.zhopa2_artifact_cargo_count)
+	write_string(packet, squad and squad.zhopa2_artifact_cargo_value)
+	write_string(packet, squad and squad.zhopa2_artifact_cargo_sections)
+	write_string(packet, squad and squad.zhopa2_artifact_cargo_last_id)
+	write_string(packet, squad and squad.zhopa2_artifact_id)
+	write_string(packet, squad and squad.zhopa2_artifact_section)
+	packet:w_stringZ(MARKER_END)
+end
+
+function M.read_squad(packet, squad)
+	if not (packet and squad) then
+		return false
+	end
+
+	local marker = packet:r_stringZ()
+	if marker ~= MARKER_START then
+		M.reset_squad(squad)
+		squad.zhopa2_last_reason = "bad_state_marker"
+		return false
+	end
+
+	local version = tonumber(packet:r_stringZ())
+	local field_count = tonumber(packet:r_stringZ()) or 0
+	if not version or version < 1 or version > VERSION or field_count < BASE_FIELD_COUNT then
+		M.reset_squad(squad)
+		squad.zhopa2_last_reason = "bad_state_version"
+		return false
+	end
+
+	squad.zhopa2_task = read_string(packet)
+	squad.zhopa2_target = tonumber(read_string(packet))
+	squad.zhopa2_started = utils_data.r_CTime(packet, "zhopa2_memory.zhopa2_started")
+	squad.zhopa2_until = tonumber(read_string(packet))
+	squad.zhopa2_patrol = read_string(packet)
+	squad.zhopa2_patrol_idx = tonumber(read_string(packet))
+	squad.zhopa2_last_reason = read_string(packet)
+	squad.zhopa2_managed = read_string(packet) == "true"
+	squad.zhopa2_resume_task = field_count >= 9 and read_string(packet) or nil
+	squad.zhopa2_resume_target = field_count >= 10 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_resume_until = field_count >= 11 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_resume_patrol = field_count >= 12 and read_string(packet) or nil
+	squad.zhopa2_resume_patrol_idx = field_count >= 13 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_resume_reason = field_count >= 14 and read_string(packet) or nil
+	squad.zhopa2_recent_smarts = field_count >= 15 and read_string(packet) or nil
+	squad.zhopa2_last_result = field_count >= 16 and read_string(packet) or nil
+	squad.zhopa2_recent_targets = field_count >= 17 and read_string(packet) or nil
+	squad.zhopa2_loot_count = field_count >= 18 and (tonumber(read_string(packet)) or 0) or 0
+	squad.zhopa2_loot_value = field_count >= 19 and (tonumber(read_string(packet)) or 0) or 0
+	squad.zhopa2_artifact_cargo_count = field_count >= 20 and (tonumber(read_string(packet)) or 0) or 0
+	squad.zhopa2_artifact_cargo_value = field_count >= 21 and (tonumber(read_string(packet)) or 0) or 0
+	squad.zhopa2_artifact_cargo_sections = field_count >= 22 and read_string(packet) or nil
+	squad.zhopa2_artifact_cargo_last_id = field_count >= 23 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_artifact_id = field_count >= 24 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_artifact_section = field_count >= 25 and read_string(packet) or nil
+	squad.zhopa2_artifact_collect_started = nil
+	squad.zhopa2_state_version = version
+
+	for i = FIELD_COUNT + 1, field_count do
+		if packet:r_elapsed() > 0 then
+			packet:r_stringZ()
+		end
+	end
+
+	local end_marker = packet:r_elapsed() > 0 and packet:r_stringZ() or nil
+	if end_marker ~= MARKER_END then
+		M.reset_squad(squad)
+		squad.zhopa2_last_reason = "bad_state_end_marker"
+		return false
+	end
+
+	if squad.zhopa2_task and squad.zhopa2_target then
+		squad.scripted_target = squad.zhopa2_target
+	end
+	if squad.zhopa2_task == "ARTEFACT" and squad.zhopa2_artifact_id then
+		local idx = index_mod()
+		if idx and type(idx.reserve_artifact_for_squad) == "function" then
+			pcall(idx.reserve_artifact_for_squad, squad, squad.zhopa2_artifact_id)
+		end
+	end
+	return true
+end
+
+_G.zhopa2_memory = M
+return M

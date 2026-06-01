@@ -1,0 +1,942 @@
+local M = {}
+
+local PENDING_FILL_TTL_MS = 10000
+local SERVICE_TOKEN = "_sim_squad_service_"
+local ROLE_NONE = false
+
+local tinsert = table.insert
+local tconcat = table.concat
+local sfind = string.find
+local smatch = string.match
+local slower = string.lower
+local sgsub = string.gsub
+local ssub = string.sub
+
+M.marked_smarts = {}
+M.pending_emission_fill = nil
+M.registered = false
+
+local ROLE_ORDER = { "trader", "tech", "medic", "barman", "guide" }
+
+local LEVEL_SPOT_TO_ROLE = {
+	trader = "trader",
+	mechanic = "tech",
+	medic = "medic",
+	barman = "barman",
+	guider = "guide",
+	guide = "guide",
+}
+
+local ENGINE_BY_ALIAS = {
+	stalker = "stalker",
+	bandit = "bandit",
+	dolg = "dolg",
+	duty = "dolg",
+	freedom = "freedom",
+	killer = "killer",
+	merc = "killer",
+	army = "army",
+	military = "army",
+	ecolog = "ecolog",
+	monolith = "monolith",
+	csky = "csky",
+	renegade = "renegade",
+	greh = "greh",
+	isg = "isg",
+}
+
+local SERVICE_ALIAS_BY_ENGINE = {
+	stalker = "stalker",
+	bandit = "bandit",
+	dolg = "duty",
+	freedom = "freedom",
+	killer = "merc",
+	army = "army",
+	ecolog = "ecolog",
+	monolith = "monolith",
+	csky = "csky",
+	renegade = "renegade",
+	greh = "greh",
+	isg = "isg",
+}
+
+local VANILLA_PREFIX_BY_ENGINE = {
+	stalker = "stalker",
+	bandit = "bandit",
+	dolg = "dolg",
+	freedom = "freedom",
+	killer = "merc",
+	army = "army",
+	ecolog = "ecolog",
+	monolith = "monolith",
+	csky = "csky",
+	renegade = "renegade",
+	greh = "greh",
+	isg = "isg",
+}
+
+local ROLE_SUFFIX = {
+	trader = "trader",
+	tech = "mechanic",
+	medic = "medic",
+	barman = "barman",
+	guide = "guide",
+}
+
+local JOB_ROLE_CACHE = {}
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_alias(name)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_faction_alias) == "function" then
+		local ok, alias = pcall(cfg.get_faction_alias, name)
+		if ok and type(alias) == "string" and alias ~= "" then
+			return alias
+		end
+	end
+	return name
+end
+
+local function normalize_key(name)
+	if type(name) ~= "string" then
+		return nil
+	end
+	local key = sgsub(name, "^%s*(.-)%s*$", "%1")
+	key = slower(key)
+	key = sgsub(key, "^actor_", "")
+	if key == "" then
+		return nil
+	end
+	return key
+end
+
+local function owner_engine(name)
+	local key = normalize_key(name)
+	if not key then
+		return nil
+	end
+	key = normalize_key(cfg_alias(key)) or key
+	return ENGINE_BY_ALIAS[key]
+end
+
+local function service_alias(engine)
+	local resolved_engine = owner_engine(engine)
+	return resolved_engine and SERVICE_ALIAS_BY_ENGINE[resolved_engine] or nil
+end
+
+local function vanilla_prefix(engine)
+	local resolved_engine = owner_engine(engine)
+	return resolved_engine and VANILLA_PREFIX_BY_ENGINE[resolved_engine] or nil
+end
+
+local function tg()
+	return time_global and time_global() or 0
+end
+
+local function safe_manager(module_name, getter_name)
+	local mod = rawget(_G, module_name)
+	if mod and type(mod[getter_name]) == "function" then
+		local ok, mgr = pcall(mod[getter_name])
+		if ok then
+			return mgr
+		end
+	end
+	return nil
+end
+
+local function manager_time_due(mgr, last_field)
+	if not (mgr and mgr.started ~= true and game and type(game.get_game_time) == "function") then
+		return false
+	end
+	local delta = tonumber(mgr._delta)
+	local last_time = mgr[last_field]
+	if not (delta and last_time) then
+		return false
+	end
+	local ok_now, now = pcall(game.get_game_time)
+	if not (ok_now and now and type(now.diffSec) == "function") then
+		return false
+	end
+	local ok_diff, diff = pcall(function()
+		return now:diffSec(last_time)
+	end)
+	diff = ok_diff and tonumber(diff) or nil
+	return diff ~= nil and diff >= delta
+end
+
+local function callback_from_start()
+	if not (debug and type(debug.getinfo) == "function") then
+		return false
+	end
+	for depth = 3, 10 do
+		local info = debug.getinfo(depth, "n")
+		if info and info.name == "start" then
+			return true
+		end
+	end
+	return false
+end
+
+local function surge_event_due()
+	local mgr = safe_manager("surge_manager", "get_surge_manager")
+	return manager_time_due(mgr, "last_surge_time") or (mgr and mgr.started ~= true and callback_from_start() == true)
+end
+
+local function psi_storm_event_due()
+	local mgr = safe_manager("psi_storm_manager", "get_psi_storm_manager")
+	return manager_time_due(mgr, "last_psi_storm_time") or (mgr and mgr.started ~= true and callback_from_start() == true)
+end
+
+local function queue_emission_fill(kind, due)
+	M.pending_emission_fill = {
+		kind = kind or "emission",
+		due = due == true,
+		until_tg = tg() + PENDING_FILL_TTL_MS,
+	}
+	return false
+end
+
+local function flush_pending_emission_fill()
+	local pending = M.pending_emission_fill
+	if type(pending) ~= "table" then
+		return 0
+	end
+	if pending.due == true then
+		M.pending_emission_fill = nil
+		return M.fill_marked_smarts(pending.kind)
+	end
+	if tg() > (tonumber(pending.until_tg) or 0) then
+		M.pending_emission_fill = nil
+	end
+	return 0
+end
+
+local function smart_is_base(smart)
+	return smart and smart.props and tonumber(smart.props.base) and tonumber(smart.props.base) > 0
+end
+
+local function smart_name(smart)
+	if not smart then
+		return nil
+	end
+	local raw_name = smart.name
+	if type(raw_name) == "string" and raw_name ~= "" then
+		return raw_name
+	end
+	if type(raw_name) == "function" then
+		local ok, name = pcall(raw_name, smart)
+		if ok and type(name) == "string" and name ~= "" then
+			return name
+		end
+	end
+	return nil
+end
+
+local function section_exists(section)
+	if type(section) ~= "string" or section == "" then
+		return false
+	end
+	if ini_sys and type(ini_sys.section_exist) == "function" then
+		local ok, exists = pcall(function()
+			return ini_sys:section_exist(section)
+		end)
+		return ok and exists == true
+	end
+	return false
+end
+
+local function read_ini_string_from(ini, section, key)
+	if not (ini and type(section) == "string" and section ~= "" and type(key) == "string" and key ~= "") then
+		return nil
+	end
+	local ok_exist, exists = pcall(function()
+		return ini:section_exist(section) and ini:line_exist(section, key)
+	end)
+	if not (ok_exist and exists) then
+		return nil
+	end
+	local ok_value, value = pcall(function()
+		return ini:r_string(section, key)
+	end)
+	if ok_value and type(value) == "string" and value ~= "" then
+		return value
+	end
+	return nil
+end
+
+local function read_ini_string(job_or_section, key, smart)
+	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
+	local job_ini = type(job_or_section) == "table" and job_or_section.ltx or nil
+	local value = read_ini_string_from(job_ini, section, key)
+	if value ~= nil then
+		return value
+	end
+	if smart then
+		value = read_ini_string_from(smart.ltx, section, key)
+		if value ~= nil then
+			return value
+		end
+		value = read_ini_string_from(smart.ini, section, key)
+		if value ~= nil then
+			return value
+		end
+	end
+	return read_ini_string_from(ini_sys, section, key)
+end
+
+local function contains(haystack, needle)
+	return type(haystack) == "string" and type(needle) == "string" and sfind(haystack, needle, 1, true) ~= nil
+end
+
+local function strip_inline_comment(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	local pos = sfind(value, ";", 1, true)
+	if pos then
+		return ssub(value, 1, pos - 1)
+	end
+	return value
+end
+
+local function plain_unique_provider_suitable(job_or_section, smart)
+	local suitable = read_ini_string(job_or_section, "suitable", smart)
+	local suitable_l = type(suitable) == "string" and slower(strip_inline_comment(suitable)) or nil
+	if not contains(suitable_l, "check_npc_name") then
+		return false
+	end
+	if contains(suitable_l, "+") or contains(suitable_l, "-") or contains(suitable_l, "!") then
+		return false
+	end
+	if contains(suitable_l, "target_squad_name") or contains(suitable_l, "is_alive") then
+		return false
+	end
+	return true
+end
+
+local function role_from_level_spot(level_spot)
+	if type(level_spot) ~= "string" then
+		return nil
+	end
+	return LEVEL_SPOT_TO_ROLE[slower(level_spot)]
+end
+
+local function normalize_role(role)
+	if type(role) ~= "string" then
+		return nil
+	end
+	role = slower(role)
+	if role == "mechanic" then
+		return "tech"
+	end
+	if role == "trader" or role == "tech" or role == "medic" or role == "barman" or role == "guide" then
+		return role
+	end
+	return nil
+end
+
+local function classify_job_role(job_or_section, smart)
+	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
+	if type(section) ~= "string" or section == "" then
+		return nil
+	end
+	local cached = JOB_ROLE_CACHE[section]
+	if cached ~= nil then
+		return cached ~= ROLE_NONE and cached or nil
+	end
+
+	local sec_l = slower(section)
+	if contains(sec_l, "beh_trade_job") or contains(sec_l, "beh_tech_job") or contains(sec_l, "beh_medic_job") then
+		JOB_ROLE_CACHE[section] = ROLE_NONE
+		return nil
+	end
+	if contains(sec_l, "trade_slot") or contains(sec_l, "tech_slot") then
+		JOB_ROLE_CACHE[section] = ROLE_NONE
+		return nil
+	end
+
+	local suitable = read_ini_string(job_or_section, "suitable", smart)
+	local suitable_l = type(suitable) == "string" and slower(suitable) or nil
+	if contains(suitable_l, "npc_has_items_to_sell") or contains(suitable_l, "npc_has_tech_items") then
+		JOB_ROLE_CACHE[section] = ROLE_NONE
+		return nil
+	end
+
+	local role
+	if contains(suitable_l, "check_npc_trader") then
+		role = "trader"
+	elseif contains(suitable_l, "check_npc_mechanic") then
+		role = "tech"
+	elseif contains(suitable_l, "check_npc_medic") then
+		role = "medic"
+	elseif contains(suitable_l, "check_npc_barman") then
+		role = "barman"
+	end
+
+	if not role then
+		role = role_from_level_spot(read_ini_string(job_or_section, "level_spot", smart))
+	end
+
+	if not role then
+		local trade_ltx = read_ini_string(job_or_section, "trade", smart)
+		if type(trade_ltx) == "string" and trade_ltx ~= "" then
+			if contains(sec_l, "mechanic") or contains(sec_l, "tech") then
+				role = "tech"
+			elseif contains(sec_l, "medic") then
+				role = "medic"
+			elseif contains(sec_l, "barman") or contains(sec_l, "bar") then
+				role = "barman"
+			elseif contains(sec_l, "trader") or contains(sec_l, "trade") then
+				role = "trader"
+			end
+		end
+	end
+
+	if not role then
+		if contains(sec_l, "guide") or contains(sec_l, "guider") then
+			role = "guide"
+		elseif contains(sec_l, "mechanic") or contains(sec_l, "tech") then
+			role = "tech"
+		elseif contains(sec_l, "medic") then
+			role = "medic"
+		elseif contains(sec_l, "barman") then
+			role = "barman"
+		elseif contains(sec_l, "trader") then
+			role = "trader"
+		end
+	end
+
+	role = normalize_role(role)
+	JOB_ROLE_CACHE[section] = role or ROLE_NONE
+	return role
+end
+
+local function role_from_section(section)
+	if type(section) ~= "string" or section == "" then
+		return nil, nil
+	end
+	local pos = sfind(section, SERVICE_TOKEN, 1, true)
+	if pos then
+		local prefix = ssub(section, 1, pos - 1)
+		local role = normalize_role(ssub(section, pos + #SERVICE_TOKEN))
+		return role, owner_engine(prefix)
+	end
+
+	local prefix, suffix = smatch(section, "^(.+)_sim_squad_([%w_]+)$")
+	local role = normalize_role(suffix)
+	if role then
+		return role, owner_engine(prefix)
+	end
+	return nil, nil
+end
+
+local function safe_npc_section(se_obj)
+	if not se_obj then
+		return nil
+	end
+	local ok, section = pcall(function()
+		return se_obj:section_name()
+	end)
+	if ok and type(section) == "string" and section ~= "" then
+		return section
+	end
+	return nil
+end
+
+local function safe_squad_by_id(id)
+	id = tonumber(id)
+	if not id or id <= 0 or id == 65535 then
+		return nil
+	end
+	if alife_object then
+		local ok, obj = pcall(alife_object, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	if alife then
+		local ok_sim, sim = pcall(alife)
+		if ok_sim and sim then
+			local ok, obj = pcall(function()
+				return sim:object(id)
+			end)
+			if ok and obj then
+				return obj
+			end
+		end
+	end
+	return nil
+end
+
+local function online_object(se_obj)
+	local id = tonumber(se_obj and se_obj.id)
+	if not id then
+		return nil
+	end
+	local st = db and db.storage and db.storage[id] or nil
+	if st and st.object then
+		return st.object
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, obj = pcall(level.object_by_id, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function is_stalker_se(se_obj)
+	if not (se_obj and IsStalker) then
+		return false
+	end
+	local ok, cls = pcall(function()
+		return se_obj:clsid()
+	end)
+	return ok and IsStalker(nil, cls) == true
+end
+
+local function set_online_community(se_obj, engine_owner)
+	if not engine_owner then
+		return false
+	end
+	local obj = online_object(se_obj)
+	if not (obj and type(obj.set_character_community) == "function") then
+		return false
+	end
+	local ok = pcall(function()
+		obj:set_character_community(engine_owner, 0, 0)
+	end)
+	return ok == true
+end
+
+local function service_squad_from_member(se_obj)
+	local group_id = tonumber(se_obj and se_obj.group_id)
+	if not group_id or group_id <= 0 or group_id == 65535 then
+		return nil
+	end
+	return safe_squad_by_id(group_id)
+end
+
+local function pin_service_squad(squad, smart, section)
+	if not (squad and smart and smart.id) then
+		return false
+	end
+	local name = smart_name(smart)
+	if not name then
+		return false
+	end
+	squad.zhopa2_section_name = squad.zhopa2_section_name or section
+	squad.zhopa2_service_filler = true
+	squad.scripted_target = name
+	squad.assigned_target_id = smart.id
+	squad.current_target_id = nil
+	squad.current_action = 0
+	squad.task_target_id = nil
+	squad.rush_to_target = nil
+	if SIMBOARD and type(SIMBOARD.assign_squad_to_smart) == "function" and tonumber(squad.smart_id) ~= tonumber(smart.id) then
+		pcall(function()
+			SIMBOARD:assign_squad_to_smart(squad, smart.id)
+		end)
+	end
+	return true
+end
+
+local function adopt_service_squad(squad, smart, engine_owner, section)
+	if not (squad and engine_owner) then
+		return false
+	end
+	squad.player_id = engine_owner
+	return pin_service_squad(squad, smart, section or squad.zhopa2_section_name)
+end
+
+local function adopt_service_member(se_obj, smart, engine_owner, section)
+	if not (se_obj and engine_owner) then
+		return false
+	end
+	set_online_community(se_obj, engine_owner)
+	local squad = service_squad_from_member(se_obj)
+	if squad then
+		adopt_service_squad(squad, smart, engine_owner, section or squad.zhopa2_section_name)
+	end
+	return true
+end
+
+local function collect_allowed_roles(smart)
+	local out = {}
+	local jobs = smart and smart.stalker_jobs or nil
+	if type(jobs) ~= "table" then
+		return out
+	end
+	for i = 1, #jobs do
+		local role = classify_job_role(jobs[i], smart)
+		if role then
+			out[role] = true
+		end
+	end
+	return out
+end
+
+local function role_from_member_info(info, smart)
+	local se_obj = type(info) == "table" and info.se_obj or nil
+	if not is_stalker_se(se_obj) then
+		return nil, nil, nil
+	end
+	local role = type(info.job) == "table" and classify_job_role(info.job, smart) or nil
+	local squad = service_squad_from_member(se_obj)
+	local section = squad and squad.zhopa2_section_name or nil
+	if not role and section then
+		role = role_from_section(section)
+	end
+	if not role then
+		role = role_from_section(safe_npc_section(se_obj))
+	end
+	return role, squad, section
+end
+
+function M.job_accepts_service_npc(npc_info, job, smart)
+	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true then
+		return false
+	end
+	if not (npc_info and job and smart) then
+		return false
+	end
+	if not plain_unique_provider_suitable(job, smart) then
+		return false
+	end
+	local job_role = classify_job_role(job, smart)
+	if not job_role then
+		return false
+	end
+	local npc_role = role_from_member_info(npc_info, smart)
+	return npc_role == job_role
+end
+
+local function collect_existing_roles(smart, engine_owner)
+	local existing = {}
+	local service_count = 0
+	if smart and type(smart.npc_info) == "table" then
+		for _, info in pairs(smart.npc_info) do
+			local role, squad, section = role_from_member_info(info, smart)
+			if role then
+				existing[role] = true
+				service_count = service_count + 1
+				if engine_owner then
+					adopt_service_member(info.se_obj, smart, engine_owner, section)
+					if squad then
+						adopt_service_squad(squad, smart, engine_owner, section)
+					end
+				end
+			end
+		end
+	end
+
+	local node = smart and smart.id and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+	if node and type(node.squads) == "table" then
+		for squad_id in pairs(node.squads) do
+			local squad = safe_squad_by_id(squad_id)
+			local section = squad and squad.zhopa2_section_name or nil
+			local role = role_from_section(section)
+			if role then
+				if not existing[role] then
+					service_count = service_count + 1
+				end
+				existing[role] = true
+				if engine_owner then
+					adopt_service_squad(squad, smart, engine_owner, section)
+				end
+			end
+		end
+	end
+	return existing, service_count
+end
+
+local function roles_from_set(set)
+	local out = {}
+	if type(set) ~= "table" then
+		return out
+	end
+	for i = 1, #ROLE_ORDER do
+		local role = ROLE_ORDER[i]
+		if set[role] == true then
+			out[#out + 1] = role
+		end
+	end
+	return out
+end
+
+local function missing_roles(allowed, existing)
+	local out = {}
+	for i = 1, #ROLE_ORDER do
+		local role = ROLE_ORDER[i]
+		if allowed[role] == true and existing[role] ~= true then
+			out[#out + 1] = role
+		end
+	end
+	return out
+end
+
+local function roles_string(roles)
+	if type(roles) ~= "table" or #roles <= 0 then
+		return "-"
+	end
+	return tconcat(roles, ",")
+end
+
+local function clear_smart_fields(smart)
+	if not smart then
+		return
+	end
+	smart.zhopa2_service_owner = nil
+	smart.zhopa2_service_count = nil
+	smart.zhopa2_service_allowed_roles = nil
+	smart.zhopa2_service_missing_count = nil
+	smart.zhopa2_service_missing_roles = nil
+	smart.zhopa2_service_needs_fill = nil
+end
+
+local function mark_smart(smart, engine_owner, missing, reason)
+	if not (smart and smart.id and engine_owner and type(missing) == "table") then
+		return false
+	end
+	M.marked_smarts[smart.id] = {
+		smart_id = smart.id,
+		smart_name = smart_name(smart),
+		owner = engine_owner,
+		missing_roles = roles_string(missing),
+		updated = tg(),
+		reason = reason or "smart_update",
+	}
+	return true
+end
+
+local function unmark_smart(smart)
+	if smart and smart.id then
+		M.marked_smarts[smart.id] = nil
+	end
+end
+
+local function resolve_ownership(smart, ownership)
+	if ownership and ownership.state == "owned" and ownership.owner then
+		return owner_engine(ownership.owner)
+	end
+	if smart and smart.zhopa2_ownership_state == "owned" and smart.zhopa2_ownership_owner then
+		return owner_engine(smart.zhopa2_ownership_owner)
+	end
+	local index = rawget(_G, "zhopa2_index")
+	if index and type(index.base_ownership) == "function" then
+		local ok, own = pcall(index.base_ownership, smart)
+		if ok and own and own.state == "owned" and own.owner then
+			return owner_engine(own.owner)
+		end
+	end
+	return nil
+end
+
+local function service_section(engine_owner, role)
+	engine_owner = owner_engine(engine_owner)
+	role = normalize_role(role)
+	if not (engine_owner and role) then
+		return nil
+	end
+	local candidates = {}
+	local alias = service_alias(engine_owner)
+	if alias then
+		tinsert(candidates, alias .. SERVICE_TOKEN .. role)
+	end
+	local prefix = vanilla_prefix(engine_owner)
+	local suffix = ROLE_SUFFIX[role]
+	if prefix and suffix then
+		tinsert(candidates, prefix .. "_sim_squad_" .. suffix)
+	end
+	if alias and suffix and alias ~= prefix then
+		tinsert(candidates, alias .. "_sim_squad_" .. suffix)
+	end
+	for i = 1, #candidates do
+		if section_exists(candidates[i]) then
+			return candidates[i]
+		end
+	end
+	return nil
+end
+
+local function spawn_service_squad(smart, engine_owner, role)
+	local section = service_section(engine_owner, role)
+	if not section then
+		return false
+	end
+	if not (SIMBOARD and type(SIMBOARD.create_squad) == "function") then
+		return false
+	end
+	local ok, squad = pcall(function()
+		return SIMBOARD:create_squad(smart, section)
+	end)
+	if not (ok and squad) then
+		return false
+	end
+	squad.zhopa2_section_name = section
+	adopt_service_squad(squad, smart, engine_owner, section)
+	return true
+end
+
+function M.reconcile_smart(smart, ownership, allow_spawn, reason)
+	if cfg_bool("enabled", true) ~= true or not smart_is_base(smart) then
+		clear_smart_fields(smart)
+		unmark_smart(smart)
+		return false
+	end
+
+	local engine_owner = resolve_ownership(smart, ownership)
+	if not engine_owner then
+		clear_smart_fields(smart)
+		unmark_smart(smart)
+		return false
+	end
+
+	local allowed = collect_allowed_roles(smart)
+	local existing, service_count = collect_existing_roles(smart, engine_owner)
+	local allowed_list = roles_from_set(allowed)
+	local missing = missing_roles(allowed, existing)
+	local needs_fill = #missing > 0
+
+	smart.zhopa2_service_owner = engine_owner
+	smart.zhopa2_service_count = service_count
+	smart.zhopa2_service_allowed_roles = roles_string(allowed_list)
+	smart.zhopa2_service_missing_count = #missing
+	smart.zhopa2_service_missing_roles = roles_string(missing)
+	smart.zhopa2_service_needs_fill = needs_fill
+
+	if needs_fill then
+		mark_smart(smart, engine_owner, missing, reason)
+	else
+		unmark_smart(smart)
+	end
+
+	if not (allow_spawn and needs_fill and cfg_bool("service_filler_enabled", true) == true) then
+		return needs_fill
+	end
+
+	local spawned = 0
+	for i = 1, #missing do
+		if spawn_service_squad(smart, engine_owner, missing[i]) then
+			spawned = spawned + 1
+		end
+	end
+
+	if spawned > 0 then
+		collect_existing_roles(smart, engine_owner)
+		unmark_smart(smart)
+		smart.zhopa2_service_needs_fill = false
+		smart.zhopa2_service_missing_count = 0
+		smart.zhopa2_service_missing_roles = "-"
+	end
+	return spawned > 0
+end
+
+local function smart_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[id] or nil
+	if node and node.smrt then
+		return node.smrt
+	end
+	return safe_squad_by_id(id)
+end
+
+function M.fill_marked_smarts(reason)
+	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true then
+		return 0
+	end
+	local total = 0
+	local ids = {}
+	for smart_id in pairs(M.marked_smarts) do
+		ids[#ids + 1] = smart_id
+	end
+	for i = 1, #ids do
+		local smart = smart_by_id(ids[i])
+		if smart then
+			if M.reconcile_smart(smart, nil, true, reason or "emission") then
+				total = total + 1
+			end
+		else
+			M.marked_smarts[ids[i]] = nil
+		end
+	end
+	return total
+end
+
+function M.on_smart_update(smart, ownership)
+	return M.reconcile_smart(smart, ownership, false, "smart_update")
+end
+
+function M.on_smart_unregister(smart)
+	unmark_smart(smart)
+	clear_smart_fields(smart)
+end
+
+function M.on_before_surge(flags)
+	return queue_emission_fill("surge", surge_event_due())
+end
+
+function M.on_before_psi_storm(flags)
+	return queue_emission_fill("psi_storm", psi_storm_event_due())
+end
+
+function M.actor_on_update()
+	return flush_pending_emission_fill()
+end
+
+function M.on_game_load()
+	M.marked_smarts = {}
+	M.pending_emission_fill = nil
+end
+
+local function server_entity_on_unregister(se_obj, type_name)
+	if type_name == "se_smart_terrain" then
+		M.on_smart_unregister(se_obj)
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_before_surge", M.on_before_surge)
+		pcall(UnregisterScriptCallback, "on_before_psi_storm", M.on_before_psi_storm)
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+	end
+	RegisterScriptCallback("on_before_surge", M.on_before_surge)
+	RegisterScriptCallback("on_before_psi_storm", M.on_before_psi_storm)
+	RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	RegisterScriptCallback("on_game_load", M.on_game_load)
+	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+	M.registered = true
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_service_fillers = M
+return M

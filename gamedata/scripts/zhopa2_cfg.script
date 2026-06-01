@@ -1,0 +1,326 @@
+local SETTINGS_SECTION = "zhopa2"
+local MCM_ROOT = "zhopa2"
+
+local settings_ini = ini_file_ex("zhopa2_settings.ltx")
+local blacklists_ini = ini_file_ex("zhopa2_smart_blacklists.ltx")
+local blacklist_value_cache = {}
+local blacklist_set_cache = {}
+local CACHE_MISS = {}
+
+local defaults = {
+	enabled = true,
+	stalker_movement_enabled = true,
+	mutant_movement_enabled = true,
+	debug_hud_enabled = false,
+	explore_enabled = true,
+	populate_enabled = true,
+	base_camping_enabled = true,
+	patrol_enabled = true,
+	night_rest_enabled = true,
+	stalker_hunt_enabled = true,
+	revenge_enabled = true,
+	revenge_actor_enabled = true,
+	revenge_actor_chance = 10,
+	artefact_enabled = false,
+	mutant_explore_enabled = true,
+	mutant_hunt_enabled = true,
+	mutant_patrol_enabled = true,
+	hunt_offline_combat_enabled = true,
+	hunt_offline_combat_interval_sec = 30,
+	hunt_offline_combat_distance = 25,
+	stalker_explore_weight = 40,
+	stalker_populate_weight = 20,
+	stalker_patrol_weight = 25,
+	stalker_hunt_weight = 15,
+	stalker_artefact_weight = 10,
+	mutant_hunt_weight = 35,
+	mutant_patrol_weight = 30,
+	mutant_explore_weight = 35,
+	target_sync_enabled = true,
+	online_intent_enforce_enabled = true,
+	trade_enabled = false,
+	smart_tasks_enabled = false,
+	story_events_enabled = false,
+	story_psy_watchdog_enabled = false,
+	base_ownership_enabled = true,
+	service_filler_enabled = true,
+	loot_enabled = true,
+	loot_corpse_detect_dist_m = 80,
+	loot_item_detect_dist_m = 50,
+	loot_event_ttl_sec = 900,
+	loot_event_cap_total = 600,
+	loot_protect_quest_items = true,
+	loot_offline_real_enabled = true,
+	rest_duration_game_hours = 0.25,
+	mutant_rest_duration_game_hours = 0.25,
+	patrol_duration_game_hours = 1,
+	mutant_patrol_duration_game_hours = 1,
+	rest_fallback_stay_min_sec = 900,
+	rest_fallback_stay_max_sec = 1800,
+}
+
+local aliases = {
+	dolg = "duty",
+	killer = "merc",
+	mutant = "monster",
+	mutants = "monster",
+}
+
+local function is_monster_or_zombied(squad)
+	local player_id = squad and squad.player_id
+	return player_id ~= nil and (
+		player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_predatory_day"
+		or player_id == "monster_predatory_night"
+		or player_id == "monster_vegetarian"
+		or player_id == "monster_zombied"
+		or player_id == "monster_zombied_day"
+		or player_id == "monster_zombied_night"
+		or player_id == "zombied"
+		or (is_squad_monster and is_squad_monster[player_id] == true)
+	)
+end
+
+local function squad_section_name(squad)
+	return squad and squad.zhopa2_section_name or nil
+end
+
+local function bool_from_value(v, default)
+	if v == nil then
+		return default
+	end
+	if type(v) == "boolean" then
+		return v
+	end
+	v = tostring(v):lower()
+	return v == "true" or v == "1" or v == "yes" or v == "on"
+end
+
+local function mcm_path_for_key(key)
+	local schema = rawget(_G, "zhopa2_mcm_schema")
+	if type(schema) == "table" and type(schema.get_path) == "function" then
+		return schema.get_path(key)
+	end
+	return nil
+end
+
+local function read_mcm(key)
+	local mcm = rawget(_G, "ui_mcm")
+	if not (mcm and type(mcm.get) == "function") then
+		return nil
+	end
+
+	local path = mcm_path_for_key(key)
+	if not path then
+		return nil
+	end
+
+	local ok, value = pcall(mcm.get, path)
+	if ok and value ~= nil then
+		return value
+	end
+	return nil
+end
+
+local function read_ltx(key, default)
+	if not (settings_ini and settings_ini.section_exist and settings_ini:section_exist(SETTINGS_SECTION)) then
+		return default
+	end
+
+	if type(default) == "boolean" then
+		return settings_ini:r_bool_ex(SETTINGS_SECTION, key, default)
+	elseif type(default) == "number" then
+		return settings_ini:r_float_ex(SETTINGS_SECTION, key) or default
+	else
+		return settings_ini:r_string_ex(SETTINGS_SECTION, key) or default
+	end
+end
+
+function get(key, default)
+	if default == nil then
+		default = defaults[key]
+	end
+
+	local value = read_mcm(key)
+	if value ~= nil then
+		return value
+	end
+
+	return read_ltx(key, default)
+end
+
+function get_bool(key, default)
+	return bool_from_value(get(key, default), default)
+end
+
+function get_num(key, default)
+	return tonumber(get(key, default)) or default
+end
+
+function get_string(key, default)
+	local v = get(key, default)
+	return v ~= nil and tostring(v) or default
+end
+
+function get_faction_alias(faction)
+	if faction == nil then
+		return nil
+	end
+	local key = tostring(faction)
+	return aliases[key] or key
+end
+
+local function reset_blacklist_cache()
+	blacklist_value_cache = {}
+	blacklist_set_cache = {}
+end
+
+local function cache_key(section, key)
+	return tostring(section or "") .. "\t" .. tostring(key or "")
+end
+
+local function section_value(section, key)
+	if not (section and key and blacklists_ini and blacklists_ini.section_exist and blacklists_ini:section_exist(section)) then
+		return nil
+	end
+	local key_id = cache_key(section, key)
+	local cached = blacklist_value_cache[key_id]
+	if cached ~= nil then
+		return cached ~= CACHE_MISS and cached or nil
+	end
+	local value = blacklists_ini:r_string_ex(section, key)
+	blacklist_value_cache[key_id] = value ~= nil and value or CACHE_MISS
+	return value
+end
+
+local function list_set(value)
+	if type(value) ~= "string" or value == "" then
+		return nil
+	end
+	value = value:lower()
+	local out = {}
+	if value == "all" then
+		out.__all = true
+		return out
+	end
+	local parts = str_explode(value, ",")
+	for i = 1, #parts do
+		local item = tostring(parts[i] or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+		if item ~= "" then
+			out[item] = true
+		end
+	end
+	return out
+end
+
+local function section_set(section, key)
+	local key_id = cache_key(section, key)
+	local cached = blacklist_set_cache[key_id]
+	if cached ~= nil then
+		return cached ~= CACHE_MISS and cached or nil
+	end
+	local set = list_set(section_value(section, key))
+	blacklist_set_cache[key_id] = set or CACHE_MISS
+	return set
+end
+
+local function section_has(section, key, value)
+	if value == nil then
+		return false
+	end
+	local set = section_set(section, key)
+	if not set then
+		return false
+	end
+	return set.__all == true or set[tostring(value):lower()] == true
+end
+
+local function section_is_true(section, key)
+	local v = section_value(section, key)
+	local set = section_set(section, key)
+	return bool_from_value(v, false) or (set and set.__all == true)
+end
+
+local function smart_name_for_blacklist(smart)
+	if not smart then
+		return ""
+	end
+	if smart.zhopa2_blacklist_name ~= nil then
+		return smart.zhopa2_blacklist_name
+	end
+	local smart_name
+	if smart.name then
+		local ok, result = pcall(function()
+			return smart:name()
+		end)
+		if ok then
+			smart_name = result
+		end
+	end
+	smart_name = smart_name or tostring(smart.id)
+	smart.zhopa2_blacklist_name = smart_name
+	return smart_name
+end
+
+function is_global_level_blacklisted(level_name)
+	return level_name ~= nil and section_is_true("zhopa2_global_level_blacklists", level_name)
+end
+
+function is_level_blacklisted_for_squad(squad, level_name)
+	if not (squad and level_name) then
+		return false
+	end
+	if is_global_level_blacklisted(level_name) then
+		return true
+	end
+
+	local faction = get_faction_alias(squad.player_id)
+	if section_has("zhopa2_faction_level_blacklists", faction, level_name) then
+		return true
+	end
+	if is_monster_or_zombied(squad) and section_has("zhopa2_faction_level_blacklists", "monster", level_name) then
+		return true
+	end
+
+	local section = squad_section_name(squad)
+	if section_has("zhopa2_section_level_blacklists", section, level_name) then
+		return true
+	end
+	return false
+end
+
+function is_smart_blacklisted_for_squad(squad, smart, level_name)
+	if not (squad and smart) then
+		return true
+	end
+
+	level_name = level_name or ""
+	local smart_name = smart_name_for_blacklist(smart)
+	if is_level_blacklisted_for_squad(squad, level_name) then
+		return true
+	end
+	if section_has("zhopa2_smart_blacklists", level_name, smart_name) then
+		return true
+	end
+
+	local faction = get_faction_alias(squad.player_id)
+	if section_has("zhopa2_faction_smart_blacklists", faction, smart_name) then
+		return true
+	end
+	if is_monster_or_zombied(squad) and section_has("zhopa2_faction_smart_blacklists", "monster", smart_name) then
+		return true
+	end
+
+	local section = squad_section_name(squad)
+	if section_has("zhopa2_section_smart_blacklists", section, smart_name) then
+		return true
+	end
+	return false
+end
+
+function reload()
+	settings_ini = ini_file_ex("zhopa2_settings.ltx")
+	blacklists_ini = ini_file_ex("zhopa2_smart_blacklists.ltx")
+	reset_blacklist_cache()
+end

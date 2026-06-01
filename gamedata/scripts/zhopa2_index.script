@@ -1,0 +1,1204 @@
+local M = {}
+
+local BASE_PULL_RADIUS = 50
+local BASE_PULL_RADIUS_SQR = BASE_PULL_RADIUS * BASE_PULL_RADIUS
+local BASE_PULL_COOLDOWN_MS = 5000
+
+M.smart_ownership = {}
+M.base_pull_squad = {}
+M.base_pull_time = {}
+M.base_camping_targets = {}
+M.base_camping_squad_target = {}
+M.base_camping_revision = 0
+M.artifact_zone = {}
+M.artifact_smart = {}
+M.artifact_level = {}
+M.artifact_section = {}
+M.artifacts = {}
+M.zone_artifacts = {}
+M.smart_artifacts = {}
+M.artifact_reserved_by = {}
+M.squad_artifact_reservation = {}
+M.smart_task_flags = {}
+M.squad_artifact_cargo = {}
+M.artifact_revision = 0
+
+local frame_scratch_key = nil
+local frame_scratch = {}
+local reset_frame_scratch
+local monster_player_ids = {
+	["monster"] = true,
+	["monster_predatory"] = true,
+	["monster_predatory_day"] = true,
+	["monster_predatory_night"] = true,
+	["monster_vegetarian"] = true,
+	["monster_zombied"] = true,
+	["monster_zombied_day"] = true,
+	["monster_zombied_night"] = true,
+	["zombied"] = true,
+}
+
+function M.get_revision()
+	return M.artifact_revision + M.base_camping_revision
+end
+
+local function mark_base_camping_registry_changed()
+	M.base_camping_revision = M.base_camping_revision + 1
+	if reset_frame_scratch then
+		reset_frame_scratch()
+	end
+end
+
+local function mark_artifact_registry_changed()
+	M.artifact_revision = M.artifact_revision + 1
+	if reset_frame_scratch then
+		reset_frame_scratch()
+	end
+end
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function smart_blacklisted_for_squad(squad, smart, level_name)
+	local cfg = cfg_mod()
+	return cfg
+		and type(cfg.is_smart_blacklisted_for_squad) == "function"
+		and cfg.is_smart_blacklisted_for_squad(squad, smart, level_name) == true
+end
+
+local function tasks_mod()
+	local tasks = rawget(_G, "zhopa2_tasks")
+	if not tasks and require then
+		pcall(require, "zhopa2_tasks")
+		tasks = rawget(_G, "zhopa2_tasks")
+	end
+	return tasks
+end
+
+local service_fillers_started = false
+local function service_fillers_mod()
+	local svc = rawget(_G, "zhopa2_service_fillers")
+	if not svc and require then
+		pcall(require, "zhopa2_service_fillers")
+		svc = rawget(_G, "zhopa2_service_fillers")
+	end
+	if svc and not service_fillers_started and type(svc.on_game_start) == "function" then
+		service_fillers_started = true
+		pcall(svc.on_game_start)
+	end
+	return svc
+end
+
+local function obj_level(obj)
+	if not (obj and obj.m_game_vertex_id) then
+		return nil
+	end
+	local gg = game_graph()
+	if not (gg and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	if not alife then
+		return nil
+	end
+	local sim = alife()
+	if not sim then
+		return nil
+	end
+	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if obj.id ~= nil and type(obj.id) ~= "function" then
+		return obj.id
+	end
+	if type(obj.id) == "function" then
+		local ok, id = pcall(obj.id, obj)
+		return ok and id or nil
+	end
+	return nil
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.section) == "function" then
+		local ok, section = pcall(obj.section, obj)
+		if ok and section then
+			return section
+		end
+	end
+	if type(obj.section_name) == "function" then
+		local ok, section = pcall(obj.section_name, obj)
+		if ok and section then
+			return section
+		end
+	end
+	return obj.section_name or obj.section
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not (id and level and type(level.object_by_id) == "function") then
+		return nil
+	end
+	local ok, obj = pcall(level.object_by_id, id)
+	return ok and obj or nil
+end
+
+local function object_is_artifact(obj)
+	if not (obj and IsArtefact and type(obj.clsid) == "function") then
+		return false
+	end
+	local ok, cls = pcall(obj.clsid, obj)
+	return ok and IsArtefact(nil, cls) == true
+end
+
+local function zone_object(zone)
+	return zone and zone.object or zone
+end
+
+local function zone_key(zone)
+	local obj = zone_object(zone)
+	local id = object_id(obj)
+	if id then
+		return "id:" .. tostring(id)
+	end
+	if obj and type(obj.name) == "function" then
+		local ok, name = pcall(obj.name, obj)
+		if ok and name then
+			return "name:" .. tostring(name)
+		end
+	end
+	return zone and tostring(zone) or nil
+end
+
+local function artifact_distance_to_sqr(a, b)
+	if not (a and b and a.position and b.position) then
+		return nil
+	end
+	local ok, dist = pcall(function()
+		return a.position:distance_to_sqr(b.position)
+	end)
+	return ok and tonumber(dist) or nil
+end
+
+local function artifact_is_valid(id)
+	local artifact_id = tonumber(id) or id
+	local art = artifact_id and alife_object and alife_object(artifact_id) or nil
+	if art then
+		if tonumber(art.parent_id) ~= 65535 then
+			return false
+		end
+		return object_is_artifact(art)
+	end
+	art = online_object_by_id(artifact_id)
+	if not art then
+		return false
+	end
+	return object_is_artifact(art)
+end
+
+local function keep_artifact_reservation_on_unregister(reason)
+	return reason == "artifact_unregister" or reason == "artifact_reregister"
+end
+
+local function smart_is_base(smart)
+	if smart and smart.props and smart.props.base and smart.props.base > 0 then
+		return true
+	end
+	local simulation_objects = rawget(_G, "simulation_objects")
+	if simulation_objects and simulation_objects.base_smarts and smart and type(smart.name) == "function" then
+		local ok, smart_name = pcall(smart.name, smart)
+		return ok and simulation_objects.base_smarts[smart_name] == true
+	end
+	return false
+end
+
+local function squad_npc_count(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return 0
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) or 0
+end
+
+local function squad_commander_id(squad)
+	if not (squad and type(squad.commander_id) == "function") then
+		return nil
+	end
+	local ok, id = pcall(squad.commander_id, squad)
+	return ok and id or nil
+end
+
+local function is_monster_squad(squad)
+	local player_id = squad and squad.player_id or nil
+	return player_id ~= nil and (monster_player_ids[player_id] == true or (is_squad_monster and is_squad_monster[player_id] == true))
+end
+
+local function squad_zhopa2_manageable(squad)
+	if not (squad and squad.id and not squad.disabled and squad_npc_count(squad) > 0 and squad_commander_id(squad)) then
+		return false
+	end
+	if type(squad.zhopa2_can_manage) ~= "function" then
+		return false
+	end
+	return squad:zhopa2_can_manage() == true
+end
+
+local function squad_targets_smart_id(squad, smart_id)
+	local id = tonumber(smart_id)
+	if not (squad and id) then
+		return false
+	end
+	return tonumber(squad.smart_id) == id
+		or tonumber(squad.assigned_target_id) == id
+		or tonumber(squad.current_target_id) == id
+		or tonumber(squad.zhopa2_target) == id
+		or tonumber(squad.scripted_target) == id
+end
+
+local function squad_base_camping_at_smart(squad, smart_id)
+	return squad_zhopa2_manageable(squad)
+		and squad.zhopa2_task == "BASE_CAMPING"
+		and squad_targets_smart_id(squad, smart_id)
+end
+
+local function object_community(obj)
+	if not obj then
+		return nil
+	end
+	if obj.player_id then
+		return obj.player_id
+	end
+	if type(obj.community) == "function" then
+		local ok, community = pcall(obj.community, obj)
+		if ok and community then
+			return community
+		end
+	end
+	return obj.community
+end
+
+local function add_count(counts, community, amount)
+	if type(community) ~= "string" or community == "" then
+		return
+	end
+	counts[community] = (counts[community] or 0) + (tonumber(amount) or 1)
+end
+
+local function each_level(levels, fn)
+	if type(fn) ~= "function" then
+		return
+	end
+	if type(levels) == "string" then
+		return fn(levels)
+	end
+	if type(levels) ~= "table" then
+		return
+	end
+	local list = levels.all_list or levels
+	if #list > 0 then
+		for i = 1, #list do
+			if fn(list[i]) == true then
+				return true
+			end
+		end
+		return
+	end
+	for level_name, enabled in pairs(levels) do
+		if enabled and fn(level_name) == true then
+			return true
+		end
+	end
+end
+
+local function limit_value(limit)
+	if limit == nil then
+		return nil
+	end
+	local max_count = math.floor(tonumber(limit) or 0)
+	return max_count >= 1 and max_count or nil
+end
+
+local function now_ms()
+	if time_global then
+		return time_global()
+	end
+	return math.floor((os and os.clock and os.clock() or 0) * 1000)
+end
+
+local function current_frame_key()
+	local dev
+	if type(device) == "function" then
+		local ok, result = pcall(device)
+		dev = ok and result or nil
+	elseif type(device) == "table" or type(device) == "userdata" then
+		dev = device
+	end
+	if dev and dev.frame ~= nil then
+		return tonumber(dev.frame) or tostring(dev.frame)
+	end
+	return now_ms()
+end
+
+function reset_frame_scratch()
+	frame_scratch_key = nil
+	frame_scratch = {}
+end
+
+local function levels_key(levels)
+	local names = {}
+	each_level(levels, function(level_name)
+		names[#names + 1] = tostring(level_name)
+		return false
+	end)
+	table.sort(names)
+	return table.concat(names, ",")
+end
+
+local function current_frame_scratch()
+	local key = current_frame_key()
+	if frame_scratch_key ~= key then
+		frame_scratch_key = key
+		frame_scratch = {}
+	end
+	return frame_scratch
+end
+
+local function frame_reader(kind, levels, limit, build_fn)
+	local max_count = limit_value(limit)
+	local key = kind .. "|" .. levels_key(levels) .. "|" .. tostring(max_count or "all")
+	local scratch = current_frame_scratch()
+	local value = scratch[key]
+	if value ~= nil then
+		return value
+	end
+	value = build_fn(max_count) or {}
+	scratch[key] = value
+	return value
+end
+
+local function simboard()
+	return rawget(_G, "SIMBOARD")
+end
+
+local function available_by_id()
+	local simulation_objects = rawget(_G, "simulation_objects")
+	return simulation_objects and simulation_objects.available_by_id or nil
+end
+
+local function vanilla_smart_entry(board, smart_id)
+	return board and board.smarts and smart_id and board.smarts[smart_id] or nil
+end
+
+local function smart_available(board, smart, available)
+	if not (smart and smart.id) then
+		return false
+	end
+	if available and available[smart.id] == false then
+		return false
+	end
+	return vanilla_smart_entry(board, smart.id) ~= nil
+end
+
+local function smart_kind_matches(smart, smart_kind)
+	if not smart_kind then
+		return true
+	end
+	if smart_kind == "base" then
+		return smart_is_base(smart)
+	end
+	local props = smart and smart.props or nil
+	if smart_kind == "rest" then
+		return smart_is_base(smart) or (props and ((props.all_stalker and props.all_stalker > 0) or (props.all and props.all > 0) or (props.territory and props.territory > 0)))
+	elseif smart_kind == "surge" then
+		return props and props.surge and props.surge > 0
+	elseif smart_kind == "resource" then
+		return props and props.resource and props.resource > 0
+	elseif smart_kind == "artefact" then
+		local flags = smart and smart.id and M.smart_task_flags[smart.id] or nil
+		return flags and flags.artefact_available == true
+	elseif smart_kind == "mutant" then
+		return props and ((props.lair and props.lair > 0) or (props.territory and props.territory > 0) or (props.all_monster and props.all_monster > 0) or (props.monster and props.monster > 0))
+	elseif smart_kind == "populate" then
+		return true
+	end
+	return true
+end
+
+local function add_smart_from_bucket(out, seen, board, available, smart_id, smart, smart_kind, max_count)
+	local entry = vanilla_smart_entry(board, smart_id)
+	smart = entry and (entry.smrt or smart) or smart
+	if smart and smart.id and not seen[smart.id] and smart_available(board, smart, available) and smart_kind_matches(smart, smart_kind) then
+		seen[smart.id] = true
+		out[#out + 1] = smart
+		if max_count and #out >= max_count then
+			return true
+		end
+	end
+	return false
+end
+
+local function read_smart_bucket(levels, smart_kind, max_count)
+	local board = simboard()
+	if board and type(board.zhopa2_ensure_buckets) == "function" then
+		board:zhopa2_ensure_buckets()
+	end
+	local by_level = board and board.zhopa2_smarts_by_level or nil
+	local by_kind = board and board.zhopa2_smarts_by_level_kind or nil
+	if not board then
+		return {}
+	end
+
+	local available = available_by_id()
+	local out = {}
+	local seen = {}
+	each_level(levels, function(level_name)
+		local bucket
+		if smart_kind and by_kind then
+			local level_kinds = by_kind and by_kind[level_name] or nil
+			bucket = level_kinds and level_kinds[smart_kind] or nil
+			if not bucket then
+				return false
+			end
+		else
+			bucket = by_level and by_level[level_name] or nil
+		end
+		if not bucket then
+			bucket = {}
+		end
+		for smart_id, smart in pairs(bucket) do
+			if add_smart_from_bucket(out, seen, board, available, smart_id, smart, smart_kind, max_count) then
+				return true
+			end
+		end
+		return false
+	end)
+	return out
+end
+
+function M.smarts_on_levels(levels, limit, smart_kind)
+	local reader_kind = smart_kind and ("smarts:" .. tostring(smart_kind)) or "smarts"
+	return frame_reader(reader_kind, levels, limit, function(max_count)
+		return read_smart_bucket(levels, smart_kind, max_count)
+	end)
+end
+
+function M.base_smarts_on_levels(levels, limit)
+	return frame_reader("base_smarts", levels, limit, function(max_count)
+		return read_smart_bucket(levels, "base", max_count)
+	end)
+end
+
+function M.squads_on_levels(levels, limit)
+	return frame_reader("squads", levels, limit, function(max_count)
+		local board = simboard()
+		if board and type(board.zhopa2_ensure_buckets) == "function" then
+			board:zhopa2_ensure_buckets()
+		end
+		local by_level = board and board.zhopa2_squads_by_level or nil
+		if not by_level then
+			return {}
+		end
+
+		local out = {}
+		local seen = {}
+		each_level(levels, function(level_name)
+			local bucket = by_level[level_name]
+			if not bucket then
+				return false
+			end
+			for squad_id, stored_squad in pairs(bucket) do
+				if not seen[squad_id] then
+					seen[squad_id] = true
+					local squad = alife_object(squad_id) or stored_squad
+					if squad and obj_level(squad) == level_name then
+						out[#out + 1] = squad
+						if max_count and #out >= max_count then
+							return true
+						end
+					end
+				end
+			end
+			return false
+		end)
+		return out
+	end)
+end
+
+function M.unregister_base_camping_target(squad)
+	if not (squad and squad.id) then
+		return false
+	end
+	local old_target = M.base_camping_squad_target[squad.id]
+	if not old_target then
+		return false
+	end
+	local bucket = M.base_camping_targets[old_target]
+	if bucket then
+		bucket[squad.id] = nil
+		local empty = true
+		for _ in pairs(bucket) do
+			empty = false
+			break
+		end
+		if empty then
+			M.base_camping_targets[old_target] = nil
+		end
+	end
+	M.base_camping_squad_target[squad.id] = nil
+	mark_base_camping_registry_changed()
+	return true
+end
+
+function M.register_base_camping_target(squad, target_id)
+	if not (squad and squad.id and target_id) then
+		return false
+	end
+	target_id = tonumber(target_id) or target_id
+	local old_target = M.base_camping_squad_target[squad.id]
+	if old_target == target_id and M.base_camping_targets[target_id] and M.base_camping_targets[target_id][squad.id] == true then
+		return true
+	end
+	M.unregister_base_camping_target(squad)
+	local bucket = M.base_camping_targets[target_id]
+	if not bucket then
+		bucket = {}
+		M.base_camping_targets[target_id] = bucket
+	end
+	bucket[squad.id] = true
+	M.base_camping_squad_target[squad.id] = target_id
+	mark_base_camping_registry_changed()
+	return true
+end
+
+local function base_camping_target_has_live_squad(smart_id)
+	local bucket = M.base_camping_targets[smart_id]
+	if not bucket then
+		return false
+	end
+	local has_live = false
+	for squad_id in pairs(bucket) do
+		local squad = alife_object(squad_id)
+		if squad
+			and squad.zhopa2_task == "BASE_CAMPING"
+			and tonumber(squad.zhopa2_target) == tonumber(smart_id)
+			and squad_npc_count(squad) > 0
+			and not is_monster_squad(squad)
+		then
+			has_live = true
+		else
+			bucket[squad_id] = nil
+			M.base_camping_squad_target[squad_id] = nil
+		end
+	end
+	return has_live
+end
+
+function M.base_camping_target_smarts_on_levels(levels)
+	return frame_reader("base_camping_target_smarts:" .. tostring(M.base_camping_revision), levels, nil, function()
+		local level_set = {}
+		each_level(levels, function(level_name)
+			level_set[level_name] = true
+			return false
+		end)
+
+		local out = {}
+		local seen = {}
+		local stale = {}
+		for smart_id in pairs(M.base_camping_targets) do
+			local smart = alife_object(smart_id)
+			local level_name = obj_level(smart)
+			if base_camping_target_has_live_squad(smart_id) then
+				if smart and smart.id and not seen[smart.id] and level_set[level_name] then
+					seen[smart.id] = true
+					out[#out + 1] = smart
+				end
+			else
+				stale[#stale + 1] = smart_id
+			end
+		end
+		for i = 1, #stale do
+			M.base_camping_targets[stale[i]] = nil
+		end
+		if #stale > 0 then
+			M.base_camping_revision = M.base_camping_revision + 1
+		end
+		return out
+	end)
+end
+
+local function smart_artifact_bucket_empty(smart_id)
+	local bucket = smart_id and M.smart_artifacts[smart_id] or nil
+	if not bucket then
+		return true
+	end
+	for _ in pairs(bucket) do
+		return false
+	end
+	return true
+end
+
+local function recalc_smart_artefact_flag(smart_id)
+	if not smart_id then
+		return
+	end
+	local flags = M.smart_task_flags[smart_id]
+	if not flags then
+		flags = {}
+		M.smart_task_flags[smart_id] = flags
+	end
+	flags.artefact_available = false
+	local bucket = M.smart_artifacts[smart_id]
+	if bucket then
+		for artifact_id in pairs(bucket) do
+			if artifact_is_valid(artifact_id) then
+				flags.artefact_available = true
+				break
+			end
+		end
+	end
+	local smart = alife_object and alife_object(smart_id) or nil
+	if smart then
+		smart.zhopa2_artefact_available = flags.artefact_available == true
+	end
+	if smart_artifact_bucket_empty(smart_id) then
+		M.smart_artifacts[smart_id] = nil
+		if flags.artefact_available ~= true then
+			M.smart_task_flags[smart_id] = nil
+		end
+	end
+end
+
+local function remove_artifact_from_zone_bucket(artifact_id, zone_id)
+	local bucket = zone_id and M.zone_artifacts[zone_id] or nil
+	if not bucket then
+		return
+	end
+	bucket[artifact_id] = nil
+	for _ in pairs(bucket) do
+		return
+	end
+	M.zone_artifacts[zone_id] = nil
+end
+
+local function remove_artifact_from_smart_bucket(artifact_id, smart_id)
+	local bucket = smart_id and M.smart_artifacts[smart_id] or nil
+	if not bucket then
+		return
+	end
+	bucket[artifact_id] = nil
+	recalc_smart_artefact_flag(smart_id)
+end
+
+local function add_artifact_to_bucket(bucket_table, key, artifact_id)
+	if not key then
+		return
+	end
+	local bucket = bucket_table[key]
+	if not bucket then
+		bucket = {}
+		bucket_table[key] = bucket
+	end
+	bucket[artifact_id] = true
+end
+
+local function resolve_artifact_smart(artifact_id, artifact_obj, level_name, zone)
+	local current = M.artifact_smart[artifact_id]
+	if current and alife_object and alife_object(current) then
+		return current
+	end
+	if not level_name then
+		return nil
+	end
+	local anchor = artifact_obj or zone_object(zone)
+	local candidates = M.smarts_on_levels({ level_name }, nil, "resource")
+	if #candidates <= 0 then
+		candidates = M.smarts_on_levels({ level_name })
+	end
+	local best
+	local best_dist
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		local dist = artifact_distance_to_sqr(anchor, smart) or 100000000
+		if smart and smart.id and (not best_dist or dist < best_dist) then
+			best = smart
+			best_dist = dist
+		end
+	end
+	return best and best.id or nil
+end
+
+function M.register_artifact(artifact_id, zone, section)
+	artifact_id = tonumber(artifact_id)
+	if not artifact_id then
+		return false
+	end
+	local art = alife_object and alife_object(artifact_id) or nil
+	if art and tonumber(art.parent_id) ~= 65535 then
+		return false
+	end
+	section = section or object_section(art)
+	local level_name = obj_level(art) or obj_level(zone_object(zone))
+	local zkey = zone_key(zone)
+	local smart_id = resolve_artifact_smart(artifact_id, art, level_name, zone)
+
+	M.unregister_artifact(artifact_id, "artifact_reregister")
+	M.artifacts[artifact_id] = true
+	M.artifact_zone[artifact_id] = zkey
+	M.artifact_level[artifact_id] = level_name
+	M.artifact_section[artifact_id] = section
+	M.artifact_smart[artifact_id] = smart_id
+	add_artifact_to_bucket(M.zone_artifacts, zkey, artifact_id)
+	add_artifact_to_bucket(M.smart_artifacts, smart_id, artifact_id)
+	recalc_smart_artefact_flag(smart_id)
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.unregister_artifact(artifact_id, reason)
+	artifact_id = tonumber(artifact_id)
+	if not artifact_id then
+		return false
+	end
+	local smart_id = M.artifact_smart[artifact_id]
+	local zkey = M.artifact_zone[artifact_id]
+	M.artifact_reserved_by[artifact_id] = nil
+	remove_artifact_from_zone_bucket(artifact_id, zkey)
+	remove_artifact_from_smart_bucket(artifact_id, smart_id)
+	M.artifact_zone[artifact_id] = nil
+	M.artifact_smart[artifact_id] = nil
+	M.artifact_level[artifact_id] = nil
+	M.artifact_section[artifact_id] = nil
+	M.artifacts[artifact_id] = nil
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.unregister_zone_artifacts(zone, reason)
+	local zkey = zone_key(zone)
+	local bucket = zkey and M.zone_artifacts[zkey] or nil
+	if not bucket then
+		return false
+	end
+	local ids = {}
+	for artifact_id in pairs(bucket) do
+		ids[#ids + 1] = artifact_id
+	end
+	for i = 1, #ids do
+		M.unregister_artifact(ids[i], reason or "zone_cleanup")
+	end
+	return #ids > 0
+end
+
+function M.smart_artefact_available(smart)
+	local smart_id = smart and smart.id or tonumber(smart)
+	local flags = smart_id and M.smart_task_flags[smart_id] or nil
+	return flags and flags.artefact_available == true
+end
+
+function M.reserve_artifact_for_squad(squad, artifact_id)
+	artifact_id = tonumber(artifact_id)
+	if not (squad and squad.id and artifact_id and artifact_is_valid(artifact_id)) then
+		return false
+	end
+	local old = M.squad_artifact_reservation[squad.id]
+	M.squad_artifact_reservation[squad.id] = artifact_id
+	squad.zhopa2_artifact_id = artifact_id
+	squad.zhopa2_artifact_smart = M.artifact_smart[artifact_id]
+	squad.zhopa2_artifact_zone = M.artifact_zone[artifact_id]
+	squad.zhopa2_artifact_section = M.artifact_section[artifact_id]
+	if old and old ~= artifact_id then
+		recalc_smart_artefact_flag(M.artifact_smart[old])
+	end
+	recalc_smart_artefact_flag(M.artifact_smart[artifact_id])
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.release_artifact_reservation(squad_or_id, reason)
+	local squad_id = type(squad_or_id) == "table" and squad_or_id.id or squad_or_id
+	squad_id = tonumber(squad_id)
+	if not squad_id then
+		return false
+	end
+	local squad = type(squad_or_id) == "table" and squad_or_id or (alife_object and alife_object(squad_id) or nil)
+	local artifact_id = M.squad_artifact_reservation[squad_id] or (squad and tonumber(squad.zhopa2_artifact_id) or nil)
+	M.squad_artifact_reservation[squad_id] = nil
+	if squad then
+		squad.zhopa2_artifact_id = nil
+		squad.zhopa2_artifact_smart = nil
+		squad.zhopa2_artifact_zone = nil
+		squad.zhopa2_artifact_section = nil
+	end
+	if artifact_id then
+		recalc_smart_artefact_flag(M.artifact_smart[artifact_id])
+	end
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.artifact_candidate_smarts_on_levels(levels, squad)
+	return frame_reader("artifact_candidate_smarts:" .. tostring(M.artifact_revision) .. ":" .. tostring(squad and squad.id or "-"), levels, nil, function()
+		local level_set = {}
+		each_level(levels, function(level_name)
+			level_set[level_name] = true
+			return false
+		end)
+		for artifact_id in pairs(M.artifacts) do
+			if not M.artifact_smart[artifact_id] and artifact_is_valid(artifact_id) and level_set[M.artifact_level[artifact_id]] then
+				local art = alife_object and alife_object(artifact_id) or nil
+				local smart_id = resolve_artifact_smart(artifact_id, art, M.artifact_level[artifact_id], M.artifact_zone[artifact_id])
+				if smart_id then
+					M.artifact_smart[artifact_id] = smart_id
+					add_artifact_to_bucket(M.smart_artifacts, smart_id, artifact_id)
+					recalc_smart_artefact_flag(smart_id)
+				end
+			end
+		end
+		local out = {}
+		local stale = {}
+		for smart_id, bucket in pairs(M.smart_artifacts) do
+			local smart = alife_object and alife_object(smart_id) or nil
+			local smart_level = smart and obj_level(smart) or nil
+			if smart and level_set[smart_level] then
+				for artifact_id in pairs(bucket) do
+					if artifact_is_valid(artifact_id) then
+						out[#out + 1] = {
+							smart = smart,
+							artifact_id = artifact_id,
+							zone = M.artifact_zone[artifact_id],
+							section = M.artifact_section[artifact_id],
+							level = M.artifact_level[artifact_id] or smart_level,
+						}
+						break
+					elseif not artifact_is_valid(artifact_id) then
+						stale[#stale + 1] = artifact_id
+					end
+				end
+			end
+		end
+		for i = 1, #stale do
+			M.unregister_artifact(stale[i], "artifact_stale")
+		end
+		return out
+	end)
+end
+
+function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
+	if not (squad and squad.id) then
+		return false
+	end
+	local count = (tonumber(squad.zhopa2_artifact_cargo_count) or 0) + 1
+	local amount = (tonumber(squad.zhopa2_artifact_cargo_value) or 0) + math.max(0, tonumber(value) or 0)
+	squad.zhopa2_artifact_cargo_count = count
+	squad.zhopa2_artifact_cargo_value = amount
+	squad.zhopa2_artifact_cargo_sections = section and tostring(section) or squad.zhopa2_artifact_cargo_sections
+	squad.zhopa2_artifact_cargo_last_id = tonumber(artifact_id)
+	M.squad_artifact_cargo[squad.id] = { count = count, value = amount, sections = squad.zhopa2_artifact_cargo_sections, last_id = squad.zhopa2_artifact_cargo_last_id }
+	squad.zhopa2_last_result = reason or "artifact_cargo"
+	return true
+end
+
+function M.clear_artifact_cargo(squad, reason)
+	if not (squad and squad.id) then
+		return false
+	end
+	M.squad_artifact_cargo[squad.id] = nil
+	squad.zhopa2_artifact_cargo_count = 0
+	squad.zhopa2_artifact_cargo_value = 0
+	squad.zhopa2_artifact_cargo_sections = nil
+	squad.zhopa2_artifact_cargo_last_id = nil
+	return true
+end
+
+function M.squad_has_artifact_cargo(squad, artifact_id)
+	if not (squad and (tonumber(squad.zhopa2_artifact_cargo_count) or 0) > 0) then
+		return false
+	end
+	artifact_id = tonumber(artifact_id)
+	if artifact_id then
+		return tonumber(squad.zhopa2_artifact_cargo_last_id) == artifact_id
+	end
+	return true
+end
+
+function M.unregister_smart(smart)
+	if not (smart and smart.id) then
+		return
+	end
+	reset_frame_scratch()
+	M.smart_ownership[smart.id] = nil
+	M.base_pull_squad[smart.id] = nil
+	M.base_pull_time[smart.id] = nil
+	M.smart_artifacts[smart.id] = nil
+	M.smart_task_flags[smart.id] = nil
+	local svc = service_fillers_mod()
+	if svc and type(svc.on_smart_unregister) == "function" then
+		pcall(svc.on_smart_unregister, smart)
+	end
+end
+
+function M.unregister_squad(squad)
+	if not (squad and squad.id) then
+		return
+	end
+	reset_frame_scratch()
+	M.release_artifact_reservation(squad, "squad_unregister")
+	M.clear_artifact_cargo(squad, "squad_unregister")
+	if zhopa2_debug_hud and type(zhopa2_debug_hud.cleanup_squad_id) == "function" then
+		zhopa2_debug_hud.cleanup_squad_id(squad.id)
+	end
+end
+
+function M.base_ownership(smart)
+	return smart and smart.id and M.smart_ownership[smart.id] or nil
+end
+
+function M.update_base_ownership(smart)
+	if not (smart and smart.id and smart_is_base(smart)) then
+		return nil
+	end
+
+	local counts = {}
+	local total = 0
+	if smart.npc_info then
+		for _, info in pairs(smart.npc_info) do
+			local se_obj = info and info.se_obj or nil
+			local community = object_community(se_obj)
+			if community then
+				add_count(counts, community, 1)
+				total = total + 1
+			end
+		end
+	end
+
+	local zhopa2_count = 0
+	local seen_zhopa2 = {}
+	local squad_bucket = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] and SIMBOARD.smarts[smart.id].squads or nil
+	if squad_bucket then
+		for squad_id in pairs(squad_bucket) do
+			local squad = alife_object(squad_id)
+			local community = object_community(squad)
+			local count = squad_npc_count(squad)
+			if community and count > 0 then
+				add_count(counts, community, count)
+				total = total + count
+			end
+			if squad_base_camping_at_smart(squad, smart.id) then
+				seen_zhopa2[squad.id] = true
+				zhopa2_count = zhopa2_count + count
+			end
+		end
+	end
+
+	local level_name = obj_level(smart)
+	if level_name then
+		local squads = M.squads_on_levels({ level_name })
+		for i = 1, #squads do
+			local squad = squads[i]
+			if squad_base_camping_at_smart(squad, smart.id) and not seen_zhopa2[squad.id] then
+				seen_zhopa2[squad.id] = true
+				zhopa2_count = zhopa2_count + squad_npc_count(squad)
+			end
+		end
+	end
+
+	local owner
+	local owner_count = 0
+	local tie = false
+	for community, count in pairs(counts) do
+		if count > owner_count then
+			owner = community
+			owner_count = count
+			tie = false
+		elseif count == owner_count then
+			tie = true
+		end
+	end
+
+	local state = "empty"
+	if total > 0 then
+		if tie then
+			state = "unstable"
+		else
+			state = "owned"
+		end
+	end
+	local ownership = {
+		state = state,
+		owner = state == "owned" and owner or nil,
+		count = owner_count,
+		total = total,
+		updated = time_global and time_global() or 0,
+		presence = zhopa2_count > 0 and "occupied" or "empty",
+		zhopa2_count = zhopa2_count,
+	}
+	M.smart_ownership[smart.id] = ownership
+	smart.zhopa2_ownership_state = ownership.state
+	smart.zhopa2_ownership_owner = ownership.owner
+	smart.zhopa2_presence_state = ownership.presence
+	smart.zhopa2_presence_count = ownership.zhopa2_count
+	return ownership
+end
+
+local function distance_to_sqr(a, b)
+	if not (a and b and a.position and b.position) then
+		return nil
+	end
+	local ok, dist = pcall(function()
+		return a.position:distance_to_sqr(b.position)
+	end)
+	return ok and tonumber(dist) or nil
+end
+
+local function current_base_pull_valid(smart)
+	local squad_id = smart and smart.id and M.base_pull_squad[smart.id] or nil
+	local squad = squad_id and alife_object(squad_id) or nil
+	if squad and squad_npc_count(squad) > 0 and squad.zhopa2_task == "BASE_CAMPING" and tonumber(squad.zhopa2_target) == smart.id then
+		return true
+	end
+	if smart and smart.id then
+		M.base_pull_squad[smart.id] = nil
+	end
+	return false
+end
+
+function M.try_empty_base_pull(smart)
+	if not (smart and smart.id and smart_is_base(smart)) then
+		return false
+	end
+	if not cfg_bool("base_camping_enabled", true) then
+		return false
+	end
+	local ownership = M.smart_ownership[smart.id] or M.update_base_ownership(smart)
+	if not (ownership and ownership.presence == "empty" and ownership.state ~= "unstable") then
+		return false
+	end
+	if current_base_pull_valid(smart) then
+		return false
+	end
+	local now = time_global and time_global() or 0
+	if M.base_pull_time[smart.id] and now > 0 and now - M.base_pull_time[smart.id] < BASE_PULL_COOLDOWN_MS then
+		return false
+	end
+	M.base_pull_time[smart.id] = now
+
+	local level_name = obj_level(smart)
+	local candidates = M.squads_on_levels({ level_name })
+	local best
+	local best_dist
+	local best_priority = -1
+	local best_reason = "base_camping_empty_base"
+	for i = 1, #candidates do
+		local squad = candidates[i]
+		local dist = distance_to_sqr(squad, smart)
+		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
+			local priority = 0
+			local reason = "base_camping_empty_base"
+			local monster = is_monster_squad(squad)
+			if ownership.owner then
+				if not monster and squad.player_id then
+					if squad.player_id == ownership.owner then
+						priority = 3
+					elseif game_relations and type(game_relations.is_factions_enemies) == "function" then
+						local ok, hostile = pcall(game_relations.is_factions_enemies, squad.player_id, ownership.owner)
+						if ok and hostile ~= true then
+							priority = 2
+							reason = "base_camping_empty_allied_base"
+						end
+					else
+						priority = 1
+						reason = "base_camping_empty_allied_base"
+					end
+				end
+			elseif ownership.state == "empty" then
+				priority = 1
+				reason = monster and "base_camping_mutant_empty_base" or "base_camping_empty_base"
+			end
+
+			if priority > 0 and (not best or priority > best_priority or (priority == best_priority and dist < best_dist)) then
+				best = squad
+				best_dist = dist
+				best_priority = priority
+				best_reason = reason
+			end
+		end
+	end
+	if not best then
+		return false
+	end
+
+	local tasks = tasks_mod()
+	if tasks and type(tasks.assign_base_camping_permanent) == "function" and tasks.assign_base_camping_permanent(best, smart, best_reason) then
+		M.base_pull_squad[smart.id] = best.id
+		smart.zhopa2_base_pull_squad_id = best.id
+		return true
+	end
+	return false
+end
+
+function M.on_smart_update(smart)
+	local ownership = M.update_base_ownership(smart)
+	local svc = service_fillers_mod()
+	if svc and type(svc.on_smart_update) == "function" then
+		pcall(svc.on_smart_update, smart, ownership)
+	end
+	if ownership and ownership.presence == "empty" then
+		M.try_empty_base_pull(smart)
+	end
+end
+
+local function server_entity_on_unregister(se_obj, type_name)
+	local is_artifact = false
+	if type_name == "se_artefact" then
+		is_artifact = true
+	elseif se_obj and IsArtefact and type(se_obj.clsid) == "function" then
+		local ok, cls = pcall(se_obj.clsid, se_obj)
+		is_artifact = ok and IsArtefact(nil, cls) == true
+	end
+	if type_name == "sim_squad_scripted" then
+		M.unregister_squad(se_obj)
+	elseif type_name == "se_smart_terrain" then
+		M.unregister_smart(se_obj)
+	elseif is_artifact then
+		M.unregister_artifact(object_id(se_obj), "artifact_unregister")
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "smart_terrain_on_update", M.on_smart_update)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+	end
+	RegisterScriptCallback("smart_terrain_on_update", M.on_smart_update)
+	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_index = M
+return M

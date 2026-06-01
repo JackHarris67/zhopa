@@ -1,0 +1,2013 @@
+local M = {}
+
+local MAX_PATROL_POINTS = 4
+local HUNT_BASE_SAFE_RADIUS = 50
+local HUNT_BASE_SAFE_RADIUS_SQR = HUNT_BASE_SAFE_RADIUS * HUNT_BASE_SAFE_RADIUS
+
+local target_maps_cache = {}
+local neighbors_cache = {}
+local frame_cache_key = nil
+local frame_cache = {}
+local NIL_VALUE = {}
+local base_smarts_on_levels
+local monster_player_ids = {
+	["monster"] = true,
+	["monster_predatory"] = true,
+	["monster_predatory_day"] = true,
+	["monster_predatory_night"] = true,
+	["monster_vegetarian"] = true,
+	["monster_zombied"] = true,
+	["monster_zombied_day"] = true,
+	["monster_zombied_night"] = true,
+	["zombied"] = true,
+}
+
+local function squad_section_name(squad)
+	return squad and squad.zhopa2_section_name or nil
+end
+
+local function section_faction(section)
+	if not (section and ini_sys and ini_sys.r_string_ex) then
+		return nil
+	end
+	local ok, faction = pcall(ini_sys.r_string_ex, ini_sys, section, "faction")
+	return ok and faction or nil
+end
+
+function M.squad_player_id(squad)
+	local player_id = squad and squad.player_id or nil
+	if player_id == "monster" or player_id == "monster_predatory" or player_id == "monster_zombied" or player_id == nil then
+		local faction = section_faction(squad_section_name(squad))
+		if faction and faction ~= "" then
+			return faction
+		end
+	end
+	return player_id
+end
+
+local function cfg()
+	return rawget(_G, "zhopa2_cfg")
+end
+
+local function now_ms()
+	if time_global then
+		return time_global()
+	end
+	return math.floor((os and os.clock and os.clock() or 0) * 1000)
+end
+
+local function current_frame_key()
+	local dev
+	if type(device) == "function" then
+		local ok, result = pcall(device)
+		dev = ok and result or nil
+	elseif type(device) == "table" or type(device) == "userdata" then
+		dev = device
+	end
+	if dev and dev.frame ~= nil then
+		return tonumber(dev.frame) or tostring(dev.frame)
+	end
+	return now_ms()
+end
+
+local function current_frame_cache()
+	local key = current_frame_key()
+	if frame_cache_key ~= key then
+		frame_cache_key = key
+		frame_cache = {}
+	end
+	return frame_cache
+end
+
+local function cached_frame_value(key, build_fn)
+	local cache = current_frame_cache()
+	local value = cache[key]
+	if value ~= nil then
+		if value == NIL_VALUE then
+			return nil
+		end
+		return value
+	end
+	value = build_fn()
+	cache[key] = value ~= nil and value or NIL_VALUE
+	return value
+end
+
+local function cached_frame_pair(key, build_fn)
+	local cache = current_frame_cache()
+	local value = cache[key]
+	if value ~= nil then
+		return value[1], value[2]
+	end
+	local first, second = build_fn()
+	cache[key] = { first, second }
+	return first, second
+end
+
+local function obj_cache_key(obj)
+	if not obj then
+		return "nil"
+	end
+	local obj_id = obj.id or obj.m_id or tostring(obj)
+	return tostring(obj_id) .. "@" .. tostring(obj.m_game_vertex_id or "")
+end
+
+local function memory_mod()
+	local mem = rawget(_G, "zhopa2_memory")
+	if not mem and require then
+		pcall(require, "zhopa2_memory")
+		mem = rawget(_G, "zhopa2_memory")
+	end
+	return mem
+end
+
+local function index_mod()
+	local idx = rawget(_G, "zhopa2_index")
+	if not idx and require then
+		pcall(require, "zhopa2_index")
+		idx = rawget(_G, "zhopa2_index")
+	end
+	return idx
+end
+
+function M.is_monster_squad(squad)
+	local player_id = M.squad_player_id(squad)
+	return player_id ~= nil and (monster_player_ids[player_id] == true or (is_squad_monster and is_squad_monster[player_id] == true))
+end
+
+function M.game_time()
+	return game and game.get_game_time and game.get_game_time() or nil
+end
+
+function M.elapsed(start_time)
+	local now = M.game_time()
+	if not (now and start_time) then
+		return 0
+	end
+	return now:diffSec(start_time)
+end
+
+function M.obj_level(obj)
+	if not (obj and obj.m_game_vertex_id) then
+		return nil
+	end
+	return cached_frame_value("obj_level|" .. obj_cache_key(obj), function()
+		local gg = game_graph()
+		if not (gg and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+			return nil
+		end
+		if not alife then
+			return nil
+		end
+		local sim = alife()
+		if not sim then
+			return nil
+		end
+		return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+	end)
+end
+
+function M.obj_same_level(a, b)
+	local a_level = M.obj_level(a)
+	return a_level ~= nil and a_level == M.obj_level(b)
+end
+
+local function add_level(set, list, level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return false
+	end
+	if set[level_name] then
+		return false
+	end
+	set[level_name] = true
+	list[#list + 1] = level_name
+	return true
+end
+
+local function target_maps(level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return {}
+	end
+	if target_maps_cache[level_name] then
+		return target_maps_cache[level_name]
+	end
+
+	local out = {}
+	local sim_objects = rawget(_G, "simulation_objects")
+	local sim_cfg = sim_objects and sim_objects.config
+	if sim_cfg and sim_cfg.section_exist and sim_cfg:section_exist(level_name) then
+		out = parse_list(sim_cfg, level_name, "target_maps") or {}
+	end
+	target_maps_cache[level_name] = out
+	return out
+end
+
+local function target_maps_has(level_name, target_level)
+	local levels = target_maps(level_name)
+	for i = 1, #levels do
+		if levels[i] == target_level then
+			return true
+		end
+	end
+	return false
+end
+
+local function topology_neighbors(level_name)
+	local topo = rawget(_G, "zhopa2_topology")
+	if topo and type(topo.get_level_neighbors) == "function" then
+		local ok, res = pcall(topo.get_level_neighbors, level_name)
+		if ok and type(res) == "table" then
+			return res
+		end
+	end
+	return {}
+end
+
+local function topology_revision()
+	local topo = rawget(_G, "zhopa2_topology")
+	if topo and type(topo.get_revision) == "function" then
+		local ok, res = pcall(topo.get_revision)
+		if ok then
+			return tonumber(res) or 0
+		end
+	end
+	return 0
+end
+
+local function add_neighbor_sources(level_name, add_fn)
+	local from_target_maps = target_maps(level_name)
+	for i = 1, #from_target_maps do
+		add_fn(from_target_maps[i])
+	end
+
+	local from_topology = topology_neighbors(level_name)
+	for i = 1, #from_topology do
+		add_fn(from_topology[i])
+	end
+end
+
+local function scan_reverse_edges(target_level, add_fn)
+	local sim_objects = rawget(_G, "simulation_objects")
+	local sim_cfg = sim_objects and sim_objects.config
+	if not (sim_cfg and sim_cfg.section_for_each and type(add_fn) == "function") then
+		return
+	end
+
+	pcall(function()
+		sim_cfg:section_for_each(function(section)
+			if section ~= target_level and target_maps_has(section, target_level) then
+				add_fn(section)
+			end
+			return false
+		end)
+	end)
+end
+
+function M.nearby_levels(level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return { direct = {}, direct_list = {}, nearby = {}, nearby_list = {}, all = {}, all_list = {} }
+	end
+	local revision = topology_revision()
+	if neighbors_cache[level_name] and neighbors_cache[level_name].topology_revision == revision then
+		return neighbors_cache[level_name]
+	end
+
+	local bundle = {
+		current = level_name,
+		topology_revision = revision,
+		direct = {},
+		direct_list = {},
+		nearby = {},
+		nearby_list = {},
+		all = {},
+		all_list = {},
+	}
+
+	local function add_direct(other_level)
+		if other_level ~= level_name and add_level(bundle.direct, bundle.direct_list, other_level) then
+			add_level(bundle.all, bundle.all_list, other_level)
+		end
+	end
+
+	local function add_nearby(other_level)
+		if other_level ~= level_name and not bundle.direct[other_level] and add_level(bundle.nearby, bundle.nearby_list, other_level) then
+			add_level(bundle.all, bundle.all_list, other_level)
+		end
+	end
+
+	add_level(bundle.all, bundle.all_list, level_name)
+	add_neighbor_sources(level_name, add_direct)
+	scan_reverse_edges(level_name, add_direct)
+
+	-- Same idea as ZHOPA BoardIndex pass2: if direct neighbors did not yield a
+	-- target, their neighbors remain a valid lower-priority search pool.
+	for i = 1, #bundle.direct_list do
+		local direct_level = bundle.direct_list[i]
+		add_neighbor_sources(direct_level, add_nearby)
+		scan_reverse_edges(direct_level, add_nearby)
+	end
+
+	neighbors_cache[level_name] = bundle
+	return bundle
+end
+
+local function smart_population(smart_id)
+	local board_smart = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id]
+	if not (board_smart and board_smart.squads) then
+		return 0
+	end
+
+	local count = 0
+	for id in pairs(board_smart.squads) do
+		local squad = alife_object(id)
+		if squad and squad.npc_count and squad:npc_count() > 0 then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function has_prey_squad(squad, smart)
+	local board_smart = smart and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id]
+	if not (board_smart and board_smart.squads) then
+		return false
+	end
+
+	for id in pairs(board_smart.squads) do
+		if id ~= squad.id then
+			local other = alife_object(id)
+			if other and not M.is_monster_squad(other) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function smart_is_base(smart)
+	if not smart then
+		return false
+	end
+	local props = smart.props or nil
+	if props and props.base and props.base > 0 then
+		return true
+	end
+	local sim_objects = rawget(_G, "simulation_objects")
+	if sim_objects and sim_objects.base_smarts then
+		local ok, smart_name = pcall(function()
+			return smart:name()
+		end)
+		return ok and sim_objects.base_smarts[smart_name] == true
+	end
+	return false
+end
+
+local function base_smarts_on_level(level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return {}
+	end
+
+	return cached_frame_value("base_smarts_on_level|" .. level_name, function()
+		local out = {}
+		local indexed = base_smarts_on_levels({ level_name })
+		for i = 1, #indexed do
+			local smart = indexed[i]
+			if smart and smart_is_base(smart) then
+				out[#out + 1] = smart.id
+			end
+		end
+		return out
+	end) or {}
+end
+
+local function distance_to_sqr(a, b)
+	if not (a and b and a.position and b.position) then
+		return nil
+	end
+	local ok, dist_sqr = pcall(function()
+		return a.position:distance_to_sqr(b.position)
+	end)
+	if ok and tonumber(dist_sqr) then
+		return tonumber(dist_sqr)
+	end
+	local ok_dist, dist = pcall(function()
+		return a.position:distance_to(b.position)
+	end)
+	dist = ok_dist and tonumber(dist) or nil
+	return dist and dist * dist or nil
+end
+
+local function target_near_base_smart(target, target_level)
+	if not target then
+		return false
+	end
+	return cached_frame_value("near_base|" .. obj_cache_key(target) .. "|" .. tostring(target_level or ""), function()
+		local target_smart = target.smart_id and alife_object(target.smart_id) or nil
+		if smart_is_base(target_smart) then
+			return true
+		end
+		if not (target and target_level and target.position) then
+			return false
+		end
+
+		local base_ids = base_smarts_on_level(target_level)
+		for i = 1, #base_ids do
+			local smart = alife_object(base_ids[i])
+			local dist_sqr = distance_to_sqr(target, smart)
+			if dist_sqr and dist_sqr <= HUNT_BASE_SAFE_RADIUS_SQR then
+				return true
+			end
+		end
+		return false
+	end) == true
+end
+
+local function smart_kind_ok(squad, smart, kind)
+	if not kind then
+		return true
+	end
+
+	local props = smart and smart.props or nil
+	if kind == "base" then
+		return smart_is_base(smart)
+	end
+	if not props then
+		return false
+	end
+
+	if kind == "rest" then
+		if smart_is_base(smart) then
+			return true
+		end
+		return (props.all_stalker and props.all_stalker > 0) or (props.all and props.all > 0) or (props.territory and props.territory > 0)
+	elseif kind == "resource" then
+		return props.resource and props.resource > 0
+	elseif kind == "surge" then
+		return props.surge and props.surge > 0
+	elseif kind == "mutant" then
+		return (props.lair and props.lair > 0) or (props.territory and props.territory > 0) or (props.all_monster and props.all_monster > 0) or (props.monster and props.monster > 0)
+	elseif kind == "populate" then
+		return true
+	end
+	return true
+end
+
+local function vanilla_nearby(squad, smart)
+	local sim_objects = rawget(_G, "simulation_objects")
+	if sim_objects and sim_objects.is_on_the_nearby_level then
+		local ok, res = pcall(sim_objects.is_on_the_nearby_level, squad, smart)
+		return ok and res == true
+	end
+	return false
+end
+
+local function level_mode_ok(mode, current_level, target_level, neighbors, squad, smart)
+	if not target_level then
+		return false
+	end
+	neighbors = neighbors or M.nearby_levels(current_level)
+	local direct = neighbors.direct or {}
+	local nearby = neighbors.nearby or {}
+	local is_vanilla_nearby = (mode == "nearby" or mode == "current_or_nearby") and vanilla_nearby(squad, smart) or false
+
+	if mode == "same" then
+		return target_level == current_level
+	elseif mode == "neighbor" then
+		return target_level ~= current_level and direct[target_level] == true
+	elseif mode == "nearby" then
+		return target_level ~= current_level and (nearby[target_level] == true or is_vanilla_nearby)
+	elseif mode == "current_or_neighbor" then
+		return target_level == current_level or direct[target_level] == true
+	elseif mode == "current_or_nearby" then
+		return target_level == current_level or direct[target_level] == true or nearby[target_level] == true or is_vanilla_nearby
+	end
+	return true
+end
+
+function M.level_names_for_mode(current_level, mode, neighbors)
+	local out = {}
+	local seen = {}
+	local function add(level_name)
+		add_level(seen, out, level_name)
+	end
+	mode = mode or "current_or_nearby"
+	neighbors = neighbors or M.nearby_levels(current_level)
+
+	if mode == "same" then
+		add(current_level)
+	elseif mode == "neighbor" then
+		for i = 1, #(neighbors.direct_list or {}) do
+			add(neighbors.direct_list[i])
+		end
+	elseif mode == "nearby" then
+		for i = 1, #(neighbors.direct_list or {}) do
+			add(neighbors.direct_list[i])
+		end
+		for i = 1, #(neighbors.nearby_list or {}) do
+			add(neighbors.nearby_list[i])
+		end
+	elseif mode == "current_or_neighbor" then
+		add(current_level)
+		for i = 1, #(neighbors.direct_list or {}) do
+			add(neighbors.direct_list[i])
+		end
+	elseif mode == "current_or_nearby" then
+		add(current_level)
+		for i = 1, #(neighbors.direct_list or {}) do
+			add(neighbors.direct_list[i])
+		end
+		for i = 1, #(neighbors.nearby_list or {}) do
+			add(neighbors.nearby_list[i])
+		end
+	else
+		add(current_level)
+		for i = 1, #(neighbors.all_list or {}) do
+			add(neighbors.all_list[i])
+		end
+	end
+	return out
+end
+
+local function index_squads_on_levels(levels)
+	local idx = index_mod()
+	if idx and type(idx.squads_on_levels) == "function" then
+		return idx.squads_on_levels(levels)
+	end
+	return {}
+end
+
+local function index_smarts_on_levels(levels, smart_kind)
+	local idx = index_mod()
+	if idx and type(idx.smarts_on_levels) == "function" then
+		return idx.smarts_on_levels(levels, nil, smart_kind)
+	end
+	return {}
+end
+
+base_smarts_on_levels = function(levels)
+	local idx = index_mod()
+	if idx and type(idx.base_smarts_on_levels) == "function" then
+		return idx.base_smarts_on_levels(levels)
+	end
+	return {}
+end
+
+local function levels_for_options(options)
+	options = options or {}
+	local current_level = options.current_level or nil
+	local neighbors = options.neighbors or M.nearby_levels(current_level)
+	return M.level_names_for_mode(current_level, options.level_mode or "current_or_nearby", neighbors)
+end
+
+local function list_key(list)
+	if not list then
+		return ""
+	end
+	local out = {}
+	for i = 1, #list do
+		out[i] = tostring(list[i])
+	end
+	table.sort(out)
+	return table.concat(out, ",")
+end
+
+local function bool_key(value)
+	return value == true and "1" or "0"
+end
+
+local function smart_options_signature(squad, options, levels)
+	return table.concat({
+		tostring(squad and squad.id or ""),
+		tostring(squad and squad.smart_id or ""),
+		tostring(options.level_mode or "current_or_nearby"),
+		tostring(options.current_level or ""),
+		list_key(levels),
+		tostring(options.kind or ""),
+		bool_key(options.safe_rest),
+		bool_key(options.populate),
+		bool_key(options.has_prey),
+		bool_key(options.ignore_population),
+		bool_key(options.skip_target_precondition),
+		bool_key(options.skip_props),
+		bool_key(options.skip_prior),
+		bool_key(options.exclude_current),
+		bool_key(options.base_populate_level_priority),
+	}, "|")
+end
+
+local function hunt_options_signature(squad, options, levels)
+	return table.concat({
+		tostring(squad and squad.id or ""),
+		tostring(squad and squad.smart_id or ""),
+		tostring(options.level_mode or "current_or_nearby"),
+		tostring(options.current_level or ""),
+		list_key(levels),
+		tostring(options.prey or ""),
+		bool_key(options.ignore_recent),
+		bool_key(options.allow_recent_fallback),
+	}, "|")
+end
+
+local function squad_npc_count(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return 0
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) or 0
+end
+
+local function squad_member_registered_at_smart(smart, squad)
+	if not (smart and smart.npc_info and squad and type(squad.squad_members) == "function") then
+		return false
+	end
+	local ok, found = pcall(function()
+		for member in squad:squad_members() do
+			local id = member and member.id
+			if id and smart.npc_info[id] then
+				return true
+			end
+		end
+		return false
+	end)
+	return ok and found == true
+end
+
+local function squad_contains_member_id(squad, obj_id)
+	if not (squad and obj_id and type(squad.squad_members) == "function") then
+		return false
+	end
+	local ok, found = pcall(function()
+		for member in squad:squad_members() do
+			if member and member.id == obj_id then
+				return true
+			end
+		end
+		return false
+	end)
+	return ok and found == true
+end
+
+local function squad_member_id_set(squad)
+	local out = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return out
+	end
+	pcall(function()
+		for member in squad:squad_members() do
+			if member and member.id then
+				out[member.id] = true
+			end
+		end
+	end)
+	return out
+end
+
+local function squad_commander_id(squad)
+	if not (squad and type(squad.commander_id) == "function") then
+		return nil
+	end
+	local ok, id = pcall(squad.commander_id, squad)
+	return ok and id or nil
+end
+
+local function is_online_offline_group(squad)
+	if not (squad and type(squad.clsid) == "function" and clsid) then
+		return false
+	end
+	local ok, class_id = pcall(squad.clsid, squad)
+	return ok and class_id == clsid.online_offline_group_s
+end
+
+local function is_zhopa2_managed_scripted_target(squad)
+	return squad
+		and squad.zhopa2_task ~= nil
+		and squad.zhopa2_target ~= nil
+		and squad.scripted_target ~= nil
+		and tostring(squad.scripted_target) == tostring(squad.zhopa2_target)
+end
+
+local function is_common_sim_squad(target)
+	if not target or target.common ~= true then
+		return false
+	end
+	if target.random_targets or target.action_condlist then
+		return false
+	end
+	if target.scripted_target and not is_zhopa2_managed_scripted_target(target) then
+		return false
+	end
+	return true
+end
+
+local function is_blacklisted_for_hunt(squad, level_name, smart)
+	local c = cfg()
+	if not c then
+		return false
+	end
+	if type(c.is_level_blacklisted_for_squad) == "function" and c.is_level_blacklisted_for_squad(squad, level_name) then
+		return true
+	end
+	if smart and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, level_name) then
+		return true
+	end
+	return false
+end
+
+local function safe_zone_squad(squad)
+	return squad and xr_combat_ignore and xr_combat_ignore.safe_zone_npcs and xr_combat_ignore.safe_zone_npcs[squad.id] == true
+end
+
+local function squad_targets_smart(other, smart)
+	if not (other and smart and smart.id) then
+		return false
+	end
+	local smart_id = tonumber(smart.id)
+	return tonumber(other.smart_id) == smart_id
+		or tonumber(other.assigned_target_id) == smart_id
+		or tonumber(other.current_target_id) == smart_id
+		or tonumber(other.zhopa2_target) == smart_id
+		or tonumber(other.scripted_target) == smart_id
+end
+
+local function squad_target_smart_id(other)
+	return other and (
+		tonumber(other.zhopa2_target)
+		or tonumber(other.assigned_target_id)
+		or tonumber(other.current_target_id)
+		or tonumber(other.smart_id)
+	) or nil
+end
+
+local function squad_near_smart(other, smart)
+	if not (other and smart and other.position and smart.position) then
+		return false
+	end
+	if M.obj_level(other) ~= M.obj_level(smart) then
+		return false
+	end
+	local radius = tonumber(smart.arrive_dist) or 0
+	if radius <= 0 then
+		radius = 25
+	end
+	local ok, dist_sqr = pcall(function()
+		return other.position:distance_to_sqr(smart.position)
+	end)
+	dist_sqr = ok and tonumber(dist_sqr) or nil
+	return dist_sqr and dist_sqr <= radius * radius or false
+end
+
+local function factions_hostile(faction, target_faction)
+	if not (faction and target_faction) then
+		return false
+	end
+	if faction == target_faction then
+		return false
+	end
+	if not game_relations then
+		return false
+	end
+
+	return cached_frame_value("factions_hostile|" .. tostring(faction) .. "|" .. tostring(target_faction), function()
+		if type(game_relations.is_factions_enemies) == "function" then
+			local ok, hostile = pcall(game_relations.is_factions_enemies, faction, target_faction)
+			if ok and hostile == true then
+				return true
+			end
+		end
+		if type(game_relations.get_factions_community) == "function" then
+			local ok, value = pcall(game_relations.get_factions_community, faction, target_faction)
+			value = ok and tonumber(value) or nil
+			if value and value <= -1000 then
+				return true
+			end
+		end
+		return false
+	end) == true
+end
+
+function M.squad_relation_hostile(squad, target)
+	return squad and target and factions_hostile(squad.player_id, target.player_id) or false
+end
+
+local function faction_relation_rank(faction, owner)
+	if not (faction and owner) then
+		return 4
+	end
+	return cached_frame_value("faction_relation_rank|" .. tostring(faction) .. "|" .. tostring(owner), function()
+		if faction == owner then
+			return 1
+		end
+		if factions_hostile(faction, owner) then
+			return nil
+		end
+		if game_relations and type(game_relations.is_factions_friends) == "function" then
+			local ok, friendly = pcall(game_relations.is_factions_friends, faction, owner)
+			if ok and friendly == true then
+				return 2
+			end
+		end
+		if game_relations and type(game_relations.get_factions_community) == "function" then
+			local ok, value = pcall(game_relations.get_factions_community, faction, owner)
+			value = ok and tonumber(value) or nil
+			if value and value > 500 then
+				return 2
+			end
+		end
+		return 3
+	end)
+end
+
+local function hostile_squad_at_smart(squad, other, smart)
+	return other
+		and other.id ~= squad.id
+		and M.squad_relation_hostile(squad, other)
+		and (squad_targets_smart(other, smart) or squad_near_smart(other, smart))
+end
+
+local targeted_stalker_squads_on_levels
+
+local function smart_has_hostile_squad(squad, smart)
+	local board_smart = smart and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+	if board_smart and board_smart.squads then
+		for id in pairs(board_smart.squads) do
+			local other = id ~= squad.id and alife_object(id) or nil
+			if other and M.squad_relation_hostile(squad, other) then
+				return true
+			end
+		end
+	end
+
+	local target_level = M.obj_level(smart)
+	if targeted_stalker_squads_on_levels then
+		local targets = targeted_stalker_squads_on_levels({ target_level })
+		local target_squads = targets[tonumber(smart.id) or smart.id]
+		for i = 1, #(target_squads or {}) do
+			if hostile_squad_at_smart(squad, target_squads[i], smart) then
+				return true
+			end
+		end
+		return false
+	end
+
+	local indexed = index_squads_on_levels({ target_level })
+	for i = 1, #indexed do
+		if hostile_squad_at_smart(squad, indexed[i], smart) then
+			return true
+		end
+	end
+	return false
+end
+
+local function base_camping_squad_at_smart(squad, other, smart)
+	return other
+		and smart
+		and other.id ~= squad.id
+		and other.zhopa2_task == "BASE_CAMPING"
+		and squad_npc_count(other) > 0
+		and not M.is_monster_squad(other)
+		and (tonumber(other.zhopa2_target) == tonumber(smart.id) or squad_targets_smart(other, smart) or squad_near_smart(other, smart))
+end
+
+local function base_camping_target_candidates_on_levels(levels, current_level)
+	local scan_seen = {}
+	local scan_levels = {}
+	for i = 1, #levels do
+		add_level(scan_seen, scan_levels, levels[i])
+	end
+	add_level(scan_seen, scan_levels, current_level)
+
+	return cached_frame_value("base_populate_target_candidates|" .. list_key(scan_levels), function()
+		local idx = index_mod()
+		if idx and type(idx.base_camping_target_smarts_on_levels) == "function" then
+			return idx.base_camping_target_smarts_on_levels(scan_levels) or {}
+		end
+
+		local out = {}
+		local seen_targets = {}
+		local indexed = index_squads_on_levels(scan_levels)
+		for i = 1, #indexed do
+			local other = indexed[i]
+			if other
+				and other.zhopa2_task == "BASE_CAMPING"
+				and squad_npc_count(other) > 0
+				and not M.is_monster_squad(other)
+			then
+				local target_id = squad_target_smart_id(other)
+				if target_id and not seen_targets[target_id] then
+					local smart = alife_object(target_id)
+					if smart then
+						seen_targets[target_id] = true
+						out[#out + 1] = smart
+					end
+				end
+			end
+		end
+		return out
+	end) or {}
+end
+
+local function base_camping_populate_level_rank(squad, smart, options)
+	if not (options and options.base_populate_level_priority == true) then
+		return 1
+	end
+	local current_level = options.current_level or M.obj_level(squad)
+	local target_level = M.obj_level(smart)
+	if target_level == current_level then
+		return 1
+	end
+	local neighbors = options.neighbors or M.nearby_levels(current_level)
+	if neighbors.direct and neighbors.direct[target_level] == true then
+		return 2
+	end
+	return 3
+end
+
+local function base_camping_populate_candidates(squad, opts)
+	local options = opts or {}
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+	local signature = smart_options_signature(squad, options, levels)
+	local validation_options = options
+	if options.base_populate_level_priority == true then
+		validation_options = {}
+		for k, v in pairs(options) do
+			validation_options[k] = v
+		end
+		validation_options.level_mode = "any"
+	end
+
+	return cached_frame_value("base_populate_candidates|" .. signature, function()
+		local candidates = base_camping_target_candidates_on_levels(levels, options.current_level)
+		if options.base_populate_level_priority == true then
+			local ranked = { {}, {}, {} }
+			for i = 1, #candidates do
+				local smart = candidates[i]
+				local rank = base_camping_populate_level_rank(squad, smart, options)
+				ranked[rank] = ranked[rank] or {}
+				ranked[rank][#ranked[rank] + 1] = smart
+			end
+			for rank = 1, 3 do
+				local out = {}
+				local list = ranked[rank] or {}
+				for i = 1, #list do
+					local smart = list[i]
+					if M.valid_smart(squad, smart, validation_options) then
+						out[#out + 1] = smart
+					end
+				end
+				if #out > 0 then
+					return out
+				end
+			end
+			return {}
+		end
+
+		local out = {}
+		for i = 1, #candidates do
+			local smart = candidates[i]
+			if M.valid_smart(squad, smart, validation_options) then
+				out[#out + 1] = smart
+			end
+		end
+		return out
+	end) or {}
+end
+
+local function base_camping_target_map(squad, candidates)
+	local ids = {}
+	local candidate_by_id = {}
+	local levels = {}
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		if smart and smart.id then
+			local smart_id = tonumber(smart.id) or smart.id
+			ids[#ids + 1] = tostring(smart_id)
+			candidate_by_id[smart_id] = true
+			local level_name = M.obj_level(smart)
+			if level_name then
+				levels[level_name] = true
+			end
+		end
+	end
+
+	table.sort(ids)
+	local cache_key = "base_camping_target_map|" .. tostring(squad and squad.id or "") .. "|" .. table.concat(ids, ",")
+	return cached_frame_value(cache_key, function()
+		local targets = {}
+		for i = 1, #candidates do
+			local smart = candidates[i]
+			local board_smart = smart and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+			if board_smart and board_smart.squads then
+				for id in pairs(board_smart.squads) do
+					local other = id ~= squad.id and alife_object(id) or nil
+					if base_camping_squad_at_smart(squad, other, smart) then
+						targets[tonumber(smart.id) or smart.id] = true
+					end
+				end
+			end
+		end
+
+		local indexed = index_squads_on_levels(levels)
+		for i = 1, #indexed do
+			local other = indexed[i]
+			local target_id = squad_target_smart_id(other)
+			if other
+				and other.id ~= squad.id
+				and other.zhopa2_task == "BASE_CAMPING"
+				and squad_npc_count(other) > 0
+				and not M.is_monster_squad(other)
+				and target_id
+				and candidate_by_id[target_id]
+			then
+				targets[target_id] = true
+			end
+		end
+		return targets
+	end) or {}
+end
+
+local function smart_owner_relation_rank(squad, smart)
+	local idx = index_mod()
+	local ownership = idx and idx.base_ownership and idx.base_ownership(smart) or nil
+	if not ownership and idx and idx.update_base_ownership then
+		ownership = idx.update_base_ownership(smart)
+	end
+	if not ownership then
+		return 4
+	end
+	if ownership.state == "unstable" then
+		return nil
+	end
+	if ownership.state == "owned" then
+		return faction_relation_rank(squad and squad.player_id, ownership.owner)
+	end
+	return 4
+end
+
+local function nonexclusive_job_capacity(jobs)
+	if not jobs then
+		return nil
+	end
+	local count = 0
+	for i = 1, #jobs do
+		if not jobs[i].exclusive then
+			count = count + 1
+		end
+	end
+	return count > 0 and count or nil
+end
+
+local function smart_stalker_job_capacity(smart)
+	if not smart then
+		return nil
+	end
+	local cached = tonumber(smart.zhopa2_job_capacity_stalker)
+	if cached and cached > 0 then
+		return cached
+	end
+	return nonexclusive_job_capacity(smart.stalker_jobs)
+end
+
+local function occupied_stalker_jobs(smart, ignore_squad)
+	if not (smart and smart.stalker_jobs and smart.npc_by_job_section) then
+		return 0
+	end
+	local ignore_ids
+	local function ignored(npc_id)
+		if not (npc_id and ignore_squad) then
+			return false
+		end
+		if not ignore_ids then
+			ignore_ids = squad_member_id_set(ignore_squad)
+		end
+		return ignore_ids[npc_id] == true
+	end
+
+	local sections = smart.zhopa2_stalker_job_nonexclusive_sections
+	if sections then
+		local count = 0
+		for section, npc_id in pairs(smart.npc_by_job_section) do
+			if npc_id and sections[section] and not ignored(npc_id) then
+				count = count + 1
+			end
+		end
+		return count
+	end
+
+	local count = 0
+	for i = 1, #smart.stalker_jobs do
+		local job = smart.stalker_jobs[i]
+		local npc_id = job and smart.npc_by_job_section[job.section] or nil
+		if job and not job.exclusive and npc_id and not ignored(npc_id) then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+targeted_stalker_squads_on_levels = function(levels)
+	return cached_frame_value("targeted_stalker_squads|" .. list_key(levels), function()
+		local out = {}
+		local indexed = index_squads_on_levels(levels)
+		for i = 1, #indexed do
+			local other = indexed[i]
+			if other and not M.is_monster_squad(other) then
+				local target_id = squad_target_smart_id(other)
+				if target_id and squad_npc_count(other) > 0 then
+					out[target_id] = out[target_id] or {}
+					out[target_id][#out[target_id] + 1] = other
+				end
+			end
+		end
+		return out
+	end) or {}
+end
+
+local function smart_incoming_stalker_npc_load(squad, smart)
+	if not (squad and smart and smart.id) then
+		return 0
+	end
+	return cached_frame_value("incoming_stalker_load|" .. tostring(squad.id) .. "|" .. tostring(smart.id), function()
+		local seen = {}
+		local count = 0
+		local function add_other(other)
+			if not (other and other.id and other.id ~= squad.id and not seen[other.id]) then
+				return
+			end
+			if M.is_monster_squad(other) or M.squad_relation_hostile(squad, other) then
+				return
+			end
+			if not (squad_targets_smart(other, smart) or squad_near_smart(other, smart)) then
+				return
+			end
+			if squad_member_registered_at_smart(smart, other) then
+				return
+			end
+			local npc_count = squad_npc_count(other)
+			if npc_count <= 0 then
+				return
+			end
+			seen[other.id] = true
+			count = count + npc_count
+		end
+
+		local board_smart = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+		if board_smart and board_smart.squads then
+			for id in pairs(board_smart.squads) do
+				add_other(alife_object(id))
+			end
+		end
+
+		local target_level = M.obj_level(smart)
+		local current_level = M.obj_level(squad)
+		local levels = { target_level }
+		if current_level and current_level ~= target_level then
+			levels[#levels + 1] = current_level
+		end
+		local targets = targeted_stalker_squads_on_levels(levels)
+		local target_squads = targets[tonumber(smart.id) or smart.id]
+		for i = 1, #(target_squads or {}) do
+			add_other(target_squads[i])
+		end
+		return count
+	end) or 0
+end
+
+function M.smart_stalker_free_job_slots(squad, smart)
+	if not (squad and smart and smart.id) then
+		return nil
+	end
+	return cached_frame_value("free_stalker_jobs|" .. tostring(squad.id) .. "|" .. tostring(smart.id), function()
+		local capacity = smart_stalker_job_capacity(smart)
+		if not capacity then
+			return nil
+		end
+		local used = occupied_stalker_jobs(smart, squad) + smart_incoming_stalker_npc_load(squad, smart)
+		local free = capacity - used
+		return free > 0 and free or 0
+	end)
+end
+
+local function base_camping_populate_score(squad, smart)
+	if not (squad and smart and smart.id) then
+		return nil
+	end
+	return cached_frame_pair("base_populate_score|" .. tostring(squad.id) .. "|" .. tostring(smart.id), function()
+		local relation_rank = smart_owner_relation_rank(squad, smart)
+		if not relation_rank then
+			return nil
+		end
+		local free_slots = M.smart_stalker_free_job_slots(squad, smart)
+		local squad_size = squad_npc_count(squad)
+		if not free_slots or squad_size <= 0 or free_slots < squad_size then
+			return nil
+		end
+		return relation_rank, free_slots
+	end)
+end
+
+local function count_rest_load_squad(squad, other, seen)
+	if not (squad and other and other.id and other.id ~= squad.id) then
+		return 0
+	end
+	if seen[other.id] then
+		return 0
+	end
+	if squad_npc_count(other) <= 0 then
+		return 0
+	end
+	if M.is_monster_squad(other) then
+		return 0
+	end
+	if M.squad_relation_hostile(squad, other) then
+		return 0
+	end
+	seen[other.id] = true
+	return 1
+end
+
+function M.smart_rest_load(squad, smart)
+	if not (squad and smart and smart.id) then
+		return 0
+	end
+	return cached_frame_value("smart_rest_load|" .. tostring(squad.id) .. "|" .. tostring(smart.id), function()
+		local seen = {}
+		local count = 0
+		local board_smart = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+		if board_smart and board_smart.squads then
+			for id in pairs(board_smart.squads) do
+				count = count + count_rest_load_squad(squad, alife_object(id), seen)
+			end
+		end
+
+		local target_level = M.obj_level(smart)
+		local current_level = M.obj_level(squad)
+		local levels = { target_level }
+		if current_level and current_level ~= target_level then
+			levels[#levels + 1] = current_level
+		end
+
+		local indexed = index_squads_on_levels(levels)
+		for i = 1, #indexed do
+			local other = indexed[i]
+			if squad_targets_smart(other, smart) or squad_near_smart(other, smart) then
+				count = count + count_rest_load_squad(squad, other, seen)
+			end
+		end
+		return count
+	end) or 0
+end
+
+local function smart_owner_hostile_or_unstable(squad, smart)
+	local idx = index_mod()
+	if not (idx and smart and smart.id) then
+		return false
+	end
+	local ownership = idx.base_ownership and idx.base_ownership(smart) or nil
+	if not ownership and idx.update_base_ownership then
+		ownership = idx.update_base_ownership(smart)
+	end
+	if not ownership then
+		return false
+	end
+	if ownership.state == "unstable" then
+		return true
+	end
+	if ownership.state == "owned" and ownership.owner and squad.player_id and ownership.owner ~= squad.player_id then
+		return factions_hostile(squad.player_id, ownership.owner)
+	end
+	return false
+end
+
+local function safe_rest_smart(squad, smart)
+	if smart_owner_hostile_or_unstable(squad, smart) then
+		return false
+	end
+	if smart_has_hostile_squad(squad, smart) then
+		return false
+	end
+	return true
+end
+
+local function hunt_prey_ok(squad, target, prey)
+	if prey == "stalker" then
+		return not M.is_monster_squad(target)
+	elseif prey == "enemy" then
+		return M.is_monster_squad(target) or M.squad_relation_hostile(squad, target)
+	end
+	return true
+end
+
+function M.valid_hunt_target(squad, target, opts)
+	if not (squad and target and target.id and target.id ~= squad.id) then
+		return false
+	end
+	if not (SIMBOARD and SIMBOARD.squads and SIMBOARD.squads[target.id]) then
+		return false
+	end
+	if not is_common_sim_squad(target) then
+		return false
+	end
+	if target.disabled or not is_online_offline_group(target) or squad_npc_count(target) <= 0 or not squad_commander_id(target) then
+		return false
+	end
+	if safe_zone_squad(squad) or safe_zone_squad(target) then
+		return false
+	end
+	if get_object_story_id and get_object_story_id(target.id) then
+		return false
+	end
+	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[target.id] then
+		return false
+	end
+
+	opts = opts or {}
+	local current_level = opts.current_level or M.obj_level(squad)
+	local target_level = M.obj_level(target)
+	local neighbors = opts.neighbors or M.nearby_levels(current_level)
+	if not level_mode_ok(opts.level_mode or "current_or_nearby", current_level, target_level, neighbors, squad, target) then
+		return false
+	end
+
+	if not hunt_prey_ok(squad, target, opts.prey) then
+		return false
+	end
+	if not M.is_monster_squad(target) and target_near_base_smart(target, target_level) then
+		return false
+	end
+
+	local target_smart = target.smart_id and alife_object(target.smart_id) or nil
+	if is_blacklisted_for_hunt(squad, target_level, target_smart) then
+		return false
+	end
+	if is_blacklisted_for_hunt(target, target_level, target_smart) then
+		return false
+	end
+
+	if not opts.ignore_recent then
+		local mem = memory_mod()
+		if mem and type(mem.recent_has_target) == "function" and mem.recent_has_target(squad, target.id) then
+			return false
+		end
+	end
+	return true
+end
+
+function M.valid_revenge_target(squad, target, opts)
+	if not (squad and target and target.id and target.id ~= squad.id) then
+		return false
+	end
+	if not (SIMBOARD and SIMBOARD.squads and SIMBOARD.squads[target.id]) then
+		return false
+	end
+	if not is_common_sim_squad(target) then
+		return false
+	end
+	if target.disabled or not is_online_offline_group(target) or squad_npc_count(target) <= 0 or not squad_commander_id(target) then
+		return false
+	end
+	if safe_zone_squad(squad) or safe_zone_squad(target) then
+		return false
+	end
+	if get_object_story_id and get_object_story_id(target.id) then
+		return false
+	end
+	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[target.id] then
+		return false
+	end
+
+	opts = opts or {}
+	local current_level = opts.current_level or M.obj_level(squad)
+	local target_level = M.obj_level(target)
+	local neighbors = opts.neighbors or M.nearby_levels(current_level)
+	if not level_mode_ok(opts.level_mode or "current_or_nearby", current_level, target_level, neighbors, squad, target) then
+		return false
+	end
+
+	local target_smart = target.smart_id and alife_object(target.smart_id) or nil
+	if is_blacklisted_for_hunt(squad, target_level, target_smart) then
+		return false
+	end
+	if is_blacklisted_for_hunt(target, target_level, target_smart) then
+		return false
+	end
+	return true
+end
+
+function M.index_squads_for_options(options, levels)
+	options = options or {}
+	levels = levels or levels_for_options(options)
+	return index_squads_on_levels(levels)
+end
+
+function M.collect_hunt_targets(squad, opts)
+	local candidates = {}
+
+	local options = opts or {}
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+
+	local indexed = M.index_squads_for_options(options, levels)
+	for i = 1, #indexed do
+		local target = indexed[i]
+		if M.valid_hunt_target(squad, target, options) then
+			candidates[#candidates + 1] = target
+		end
+	end
+	return candidates
+end
+
+local function squad_distance_uncached(squad, target)
+	if not (squad and target) then
+		return nil
+	end
+	if squad.position and target.position and M.obj_level(squad) == M.obj_level(target) then
+		local ok, dist = pcall(function()
+			return squad.position:distance_to(target.position)
+		end)
+		if ok and tonumber(dist) then
+			return tonumber(dist)
+		end
+	end
+	if utils_obj and type(utils_obj.graph_distance) == "function" and squad.m_game_vertex_id and target.m_game_vertex_id then
+		local ok, dist = pcall(utils_obj.graph_distance, squad.m_game_vertex_id, target.m_game_vertex_id)
+		if ok and tonumber(dist) then
+			return tonumber(dist)
+		end
+	end
+	return nil
+end
+
+local function squad_distance(squad, target)
+	if not (squad and target) then
+		return nil
+	end
+	return cached_frame_value("distance|" .. obj_cache_key(squad) .. "|" .. obj_cache_key(target), function()
+		return squad_distance_uncached(squad, target)
+	end)
+end
+
+local function route_smart_ok(squad, smart, target_level)
+	if not (squad and smart and smart.id and target_level) then
+		return false
+	end
+	if smart.disabled or smart.respawn_only_smart then
+		return false
+	end
+	if M.obj_level(smart) ~= target_level then
+		return false
+	end
+
+	local c = cfg()
+	if c and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, target_level) then
+		return false
+	end
+	return true
+end
+
+local function smart_from_target_id(target_id)
+	local smart = target_id and alife_object(target_id) or nil
+	if smart and smart.clsid and clsid then
+		local ok, class_id = pcall(smart.clsid, smart)
+		if ok and class_id == clsid.smart_terrain then
+			return smart
+		end
+	end
+	return nil
+end
+
+local function target_route_smart(squad, target, target_level)
+	local route_ids = { target.assigned_target_id, target.current_target_id, target.smart_id }
+	for i = 1, #route_ids do
+		local smart = smart_from_target_id(route_ids[i])
+		if route_smart_ok(squad, smart, target_level) then
+			return smart
+		end
+	end
+
+	local best
+	local best_dist = 100000000
+	local candidates = index_smarts_on_levels({ target_level })
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		if route_smart_ok(squad, smart, target_level) then
+			local dist = squad_distance(target, smart) or 100000000
+			if dist < best_dist then
+				best = smart
+				best_dist = dist
+			end
+		end
+	end
+	return best
+end
+
+local function actor_server_object()
+	local sim_fn = rawget(_G, "alife")
+	if type(sim_fn) ~= "function" then
+		return nil
+	end
+	local sim = sim_fn()
+	return sim and sim:actor() or nil
+end
+
+function M.actor_script_target(squad, opts)
+	opts = opts or {}
+	local actor = actor_server_object()
+	if not actor then
+		return nil, "actor_target_missing"
+	end
+	return cached_frame_pair("actor_script_target|" .. obj_cache_key(squad) .. "|" .. obj_cache_key(actor) .. "|" .. bool_key(opts.allow_cross_level == false), function()
+		if M.obj_same_level(squad, actor) then
+			return AC_ID or 0, "actor_direct"
+		end
+		if opts.allow_cross_level == false then
+			return nil, "actor_target_offlevel"
+		end
+
+		local actor_level = M.obj_level(actor)
+		local smart = target_route_smart(squad, actor, actor_level)
+		if smart then
+			return smart.id, "actor_route_smart"
+		end
+		return nil, "actor_target_no_route"
+	end)
+end
+
+function M.hunt_script_target(squad, target, opts)
+	opts = opts or {}
+	local prey_key = opts.prey
+	if type(prey_key) == "table" then
+		prey_key = list_key(prey_key)
+	end
+	return cached_frame_pair("hunt_script_target|" .. obj_cache_key(squad) .. "|" .. obj_cache_key(target) .. "|" .. tostring(prey_key or "") .. "|" .. bool_key(opts.allow_cross_level == false), function()
+		if not M.valid_hunt_target(squad, target, { level_mode = "any", prey = opts.prey, ignore_recent = true }) then
+			return nil, "hunt_target_invalid"
+		end
+		if M.obj_same_level(squad, target) then
+			return target.id, "hunt_direct_squad"
+		end
+		if opts.allow_cross_level == false then
+			return nil, "hunt_target_offlevel"
+		end
+
+		local target_level = M.obj_level(target)
+		local smart = target_route_smart(squad, target, target_level)
+		if smart then
+			return smart.id, "hunt_route_smart"
+		end
+		return nil, "hunt_target_no_route"
+	end)
+end
+
+function M.revenge_script_target(squad, target, opts)
+	opts = opts or {}
+	return cached_frame_pair("revenge_script_target|" .. obj_cache_key(squad) .. "|" .. obj_cache_key(target) .. "|" .. bool_key(opts.allow_cross_level == false), function()
+		if not M.valid_revenge_target(squad, target, { level_mode = "any" }) then
+			return nil, "revenge_target_invalid"
+		end
+		if M.obj_same_level(squad, target) then
+			return target.id, "revenge_direct_squad"
+		end
+		if opts.allow_cross_level == false then
+			return nil, "revenge_target_offlevel"
+		end
+
+		local target_level = M.obj_level(target)
+		local smart = target_route_smart(squad, target, target_level)
+		if smart then
+			return smart.id, "revenge_route_smart"
+		end
+		return nil, "revenge_target_no_route"
+	end)
+end
+
+local function pick_hunt_target_once(squad, options)
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+	local signature = hunt_options_signature(squad, options, levels)
+
+	return cached_frame_value("pick_hunt_target_once|" .. signature, function()
+		local best
+		local best_dist
+		local best_priority = -1
+		local idx = index_mod()
+		local indexed = M.index_squads_for_options(options, levels)
+		for i = 1, #indexed do
+			local target = indexed[i]
+			if M.valid_hunt_target(squad, target, options) then
+				local dist = squad_distance(squad, target) or 100000000
+				local priority = 0
+				if idx and type(idx.squad_has_artifact_cargo) == "function" and not M.is_monster_squad(squad) and not M.is_monster_squad(target) and idx.squad_has_artifact_cargo(target) then
+					priority = 1
+				end
+				if priority > best_priority or (priority == best_priority and (not best_dist or dist < best_dist)) then
+					best = target
+					best_dist = dist
+					best_priority = priority
+				end
+			end
+		end
+		return best
+	end)
+end
+
+function M.pick_hunt_target(squad, opts)
+	local options = {}
+	for k, v in pairs(opts or {}) do
+		options[k] = v
+	end
+
+	local best = pick_hunt_target_once(squad, options)
+	if not best and options.allow_recent_fallback == true and options.ignore_recent ~= true then
+		local fallback = {}
+		for k, v in pairs(options) do
+			fallback[k] = v
+		end
+		fallback.ignore_recent = true
+		best = pick_hunt_target_once(squad, fallback)
+	end
+	return best
+end
+
+function M.valid_smart(squad, smart, opts)
+	if not (squad and smart and smart.id and smart.id ~= squad.id) then
+		return false
+	end
+	if smart.disabled or smart.respawn_only_smart then
+		return false
+	end
+	opts = opts or {}
+	if opts.exclude_current and smart.id == squad.smart_id then
+		return false
+	end
+
+	local current_level = opts.current_level or M.obj_level(squad)
+	local target_level = M.obj_level(smart)
+	local neighbors = opts.neighbors or M.nearby_levels(current_level)
+	if not level_mode_ok(opts.level_mode, current_level, target_level, neighbors, squad, smart) then
+		return false
+	end
+
+	local c = cfg()
+	if c and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, target_level) then
+		return false
+	end
+	if not smart_kind_ok(squad, smart, opts.kind) then
+		return false
+	end
+	if opts.safe_rest and not safe_rest_smart(squad, smart) then
+		return false
+	end
+	if opts.populate and smart_population(smart.id) >= (smart.max_population or 1) then
+		return false
+	end
+	if opts.has_prey and not has_prey_squad(squad, smart) then
+		return false
+	end
+
+	if not opts.skip_target_precondition and smart.target_precondition and not smart:target_precondition(squad, opts.ignore_population == true, opts.skip_props == true) then
+		return false
+	end
+	if not opts.skip_prior and smart.evaluate_prior and smart:evaluate_prior(squad) <= 0 then
+		return false
+	end
+	return true
+end
+
+function M.safe_rest_target_valid(squad, target_id)
+	local smart = target_id and alife_object(tonumber(target_id)) or nil
+	if not smart then
+		return false
+	end
+	return M.valid_smart(squad, smart, {
+		level_mode = "any",
+		ignore_population = true,
+		skip_prior = true,
+		safe_rest = true,
+		skip_target_precondition = true,
+	})
+end
+
+function M.index_smarts_for_options(options, levels)
+	options = options or {}
+	levels = levels or levels_for_options(options)
+	return index_smarts_on_levels(levels, options.kind)
+end
+
+local function valid_smart_cached(squad, smart, options, signature)
+	if not (smart and smart.id) then
+		return false
+	end
+	local key = "valid_smart|" .. tostring(signature or "") .. "|" .. tostring(smart.id)
+	return cached_frame_value(key, function()
+		return M.valid_smart(squad, smart, options)
+	end) == true
+end
+
+function M.collect_smarts(squad, opts)
+	local candidates = {}
+
+	local options = opts or {}
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+	local signature = smart_options_signature(squad, options, levels)
+
+	local cached = cached_frame_value("collect_smarts|" .. signature, function()
+		local out = {}
+		local indexed = M.index_smarts_for_options(options, levels)
+		for i = 1, #indexed do
+			local smart = indexed[i]
+			if valid_smart_cached(squad, smart, options, signature) then
+				out[#out + 1] = smart
+			end
+		end
+		return out
+	end)
+	for i = 1, #(cached or {}) do
+		candidates[i] = cached[i]
+	end
+	return candidates
+end
+
+local function pick_smart_from_options(squad, opts)
+	local options = opts or {}
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+	local signature = smart_options_signature(squad, options, levels)
+	local indexed = M.index_smarts_for_options(options, levels)
+	local count = #indexed
+	if count <= 0 then
+		return nil
+	end
+	local start = math.random(count)
+	for offset = 0, count - 1 do
+		local index = ((start + offset - 1) % count) + 1
+		local smart = indexed[index]
+		if valid_smart_cached(squad, smart, options, signature) then
+			return smart
+		end
+	end
+	return nil
+end
+
+function M.pick_smart(squad, opts)
+	return pick_smart_from_options(squad, opts)
+end
+
+function M.pick_artifact_target(squad, opts)
+	local idx = index_mod()
+	if not (idx and type(idx.artifact_candidate_smarts_on_levels) == "function") then
+		return nil
+	end
+
+	local function artefact_clone_opts(src)
+		local out = {}
+		for k, v in pairs(src or {}) do
+			out[k] = v
+		end
+		return out
+	end
+
+	local options = artefact_clone_opts(opts or {})
+	options.kind = "artefact"
+	options.ignore_population = true
+	options.skip_prior = true
+	options.skip_target_precondition = true
+	options.current_level = options.current_level or M.obj_level(squad)
+	options.neighbors = options.neighbors or M.nearby_levels(options.current_level)
+	local levels = levels_for_options(options)
+	local signature = smart_options_signature(squad, options, levels) .. "|artifact|" .. tostring(idx.get_revision and idx.get_revision() or "")
+
+	local candidates = idx.artifact_candidate_smarts_on_levels(levels, squad)
+	local best
+	local best_dist
+	for i = 1, #(candidates or {}) do
+		local entry = candidates[i]
+		local smart = entry and entry.smart or nil
+		if entry and entry.artifact_id and smart and idx.smart_artefact_available and idx.smart_artefact_available(smart) and valid_smart_cached(squad, smart, options, signature) then
+			local dist = squad_distance(squad, smart) or 100000000
+			if not best_dist or dist < best_dist then
+				best = entry
+				best_dist = dist
+			end
+		end
+	end
+	if best then
+		best.reason = best.reason or "artefact_available"
+		return best
+	end
+
+	if options.fallback_level_mode then
+		local fallback = artefact_clone_opts(options)
+		fallback.level_mode = options.fallback_level_mode
+		fallback.fallback_level_mode = nil
+		return M.pick_artifact_target(squad, fallback)
+	end
+	return nil
+end
+
+function M.pick_closest_smart(squad, opts)
+	local candidates = M.collect_smarts(squad, opts)
+	local best
+	local best_dist
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		local dist = squad_distance(squad, smart) or 100000000
+		if not best_dist or dist < best_dist then
+			best = smart
+			best_dist = dist
+		end
+	end
+	return best
+end
+
+function M.pick_balanced_rest_smart(squad, opts)
+	local candidates = M.collect_smarts(squad, opts)
+	local best
+	local best_load
+	local best_dist
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		local load = M.smart_rest_load(squad, smart)
+		local dist = squad_distance(squad, smart) or 100000000
+		if not best
+			or load < best_load
+			or (load == best_load and dist < best_dist)
+		then
+			best = smart
+			best_load = load
+			best_dist = dist
+		end
+	end
+	return best
+end
+
+function M.pick_base_camping_populate_smart(squad, opts)
+	local options = opts or {}
+	local candidates = base_camping_populate_candidates(squad, opts)
+	local best
+	local best_level_rank
+	local best_rank
+	local best_free
+	local best_dist
+	for i = 1, #candidates do
+		local smart = candidates[i]
+		local relation_rank, free_slots = base_camping_populate_score(squad, smart)
+		if relation_rank then
+			local level_rank = options.base_populate_level_priority == true and 1 or base_camping_populate_level_rank(squad, smart, options)
+			local dist = squad_distance(squad, smart) or 100000000
+			if not best
+			or level_rank < best_level_rank
+			or (level_rank == best_level_rank and relation_rank < best_rank)
+			or (level_rank == best_level_rank and relation_rank == best_rank and free_slots > best_free)
+			or (level_rank == best_level_rank and relation_rank == best_rank and free_slots == best_free and dist < best_dist)
+			then
+				best = smart
+				best_level_rank = level_rank
+				best_rank = relation_rank
+				best_free = free_slots
+				best_dist = dist
+			end
+		end
+	end
+	return best
+end
+
+function M.base_camping_populate_target_valid(squad, smart)
+	if not (squad and smart and smart.id) then
+		return false
+	end
+	if not M.valid_smart(squad, smart, {
+		level_mode = "any",
+		kind = "base",
+		ignore_population = true,
+		skip_prior = true,
+		safe_rest = true,
+		skip_target_precondition = true,
+	}) then
+		return false
+	end
+	local targets = base_camping_target_map(squad, { smart })
+	local smart_id = tonumber(smart.id) or smart.id
+	return targets[smart_id] == true and base_camping_populate_score(squad, smart) ~= nil
+end
+
+function M.pick_final_prior_smart(squad, smart_or_list, opts)
+	if not smart_or_list then
+		return nil
+	end
+	opts = opts or {}
+	if opts.skip_prior == true then
+		local entry = (smart_or_list.id or smart_or_list.smart) and smart_or_list or smart_or_list[1]
+		return entry and (entry.smart or entry) or nil
+	end
+
+	local list = smart_or_list
+	if smart_or_list.id or smart_or_list.smart then
+		list = { smart_or_list }
+	end
+
+	for i = 1, #list do
+		local entry = list[i]
+		local smart = entry and (entry.smart or entry) or nil
+		if smart then
+			if not smart.evaluate_prior or smart:evaluate_prior(squad) > 0 then
+				return smart
+			end
+		end
+	end
+	return nil
+end
+
+local function clone_opts(src)
+	local out = {}
+	for k, v in pairs(src or {}) do
+		out[k] = v
+	end
+	return out
+end
+
+function M.pick_weighted_smart(squad, opts, fallback_opts)
+	local primary_opts = clone_opts(opts or {})
+
+	local fallback_level_mode = primary_opts.fallback_level_mode
+	local secondary_opts = fallback_opts
+	if not secondary_opts and fallback_level_mode then
+		secondary_opts = clone_opts(primary_opts)
+		secondary_opts.level_mode = fallback_level_mode
+		secondary_opts.fallback_level_mode = nil
+	end
+
+	local smart = M.pick_smart(squad, primary_opts)
+	if smart then
+		return smart
+	end
+	if secondary_opts then
+		return M.pick_smart(squad, secondary_opts)
+	end
+	return nil
+end
+
+function M.pack_ids(list)
+	local out = {}
+	for i = 1, #list do
+		out[i] = tostring(list[i])
+	end
+	return table.concat(out, ",")
+end
+
+function M.unpack_ids(value)
+	local out = {}
+	if type(value) ~= "string" or value == "" then
+		return out
+	end
+
+	local parts = str_explode(value, ",")
+	for i = 1, #parts do
+		local id = tonumber(parts[i])
+		if id then
+			out[#out + 1] = id
+		end
+	end
+	return out
+end
+
+function M.is_night()
+	local hour = level and level.get_time_hours and level.get_time_hours() or 12
+	return hour >= 21 or hour <= 5
+end
+
+function M.make_patrol(squad, kind, opts)
+	opts = opts or {}
+	local candidates = M.collect_smarts(squad, {
+		level_mode = "same",
+		kind = kind,
+		ignore_population = true,
+		exclude_current = true,
+		skip_prior = true,
+	})
+	if #candidates == 0 then
+		return nil
+	end
+
+	shuffle_table(candidates)
+	local ids = {}
+	for i = 1, #candidates do
+		ids[#ids + 1] = candidates[i].id
+		if #ids >= MAX_PATROL_POINTS then
+			break
+		end
+	end
+	if #ids == 0 then
+		return nil
+	end
+	return ids
+end
+
+_G.zhopa2_perception = M
+return M
