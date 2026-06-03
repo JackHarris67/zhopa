@@ -56,6 +56,18 @@ local function debug_print_enabled()
 	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
 end
 
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+function M.offline_enabled()
+	return cfg_bool("enabled", true) == true and cfg_bool("artefact_offline_enabled", true) == true
+end
+
 local function gather_mod()
 	local gather = rawget(_G, "xr_gather_items")
 	if not gather and type(load_module) == "function" then
@@ -712,6 +724,9 @@ local function unregister_virtual_artifact(artifact_id, reason)
 end
 
 local function materialize_virtual_artifact_online(squad, artifact_id)
+	if M.offline_enabled() ~= true then
+		return artifact_id, false, "artifact_offline_disabled"
+	end
 	local idx = index_mod()
 	if not (squad and squad.online == true and idx and type(idx.is_virtual_artifact) == "function" and idx.is_virtual_artifact(artifact_id)) then
 		return artifact_id, false, nil
@@ -776,6 +791,10 @@ end
 
 function M.offline_collect(squad, artifact_id, reason)
 	artifact_id = tonumber(artifact_id)
+	if M.offline_enabled() ~= true then
+		release_artifact_reservation(squad, "artifact_offline_disabled")
+		return false, "artifact_offline_disabled"
+	end
 	local virtual = virtual_artifact_data(artifact_id)
 	if virtual then
 		return M.offline_collect_virtual(squad, artifact_id, reason)
@@ -819,6 +838,10 @@ end
 
 function M.offline_collect_virtual(squad, artifact_id, reason)
 	artifact_id = tonumber(artifact_id)
+	if M.offline_enabled() ~= true then
+		release_artifact_reservation(squad, "artifact_offline_disabled")
+		return false, "artifact_offline_disabled"
+	end
 	local virtual = virtual_artifact_data(artifact_id)
 	if not (squad and artifact_id and virtual) then
 		debug_artifact_error(squad, "artifact_virtual_missing", artifact_id, nil, reason or "offline_collect_virtual")

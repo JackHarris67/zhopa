@@ -1,0 +1,478 @@
+local M = {}
+
+local dumped = false
+local MAX_SQUADS = 5
+local MAX_UPDATE_SQUADS = 20
+local MAX_MEMBERS = 4
+local MAX_ITEMS = 40
+local INVALID_ID = 65535
+local dumped_update_squads = {}
+local dumped_update_count = 0
+
+local OWNER_PROBES = {
+	"m_dwMoney",
+	"money",
+	"get_money",
+	"give_money",
+	"transfer_money",
+	"profile_name",
+	"community",
+	"rank",
+	"reputation",
+	"online",
+	"parent_id",
+}
+
+local OWNER_CALL_PROBES = {
+	money = true,
+	get_money = true,
+	profile_name = true,
+	community = true,
+	rank = true,
+	reputation = true,
+}
+
+local ITEM_PROBES = {
+	"id",
+	"parent_id",
+	"section_name",
+	"section",
+	"clsid",
+	"online",
+	"m_fCondition",
+	"m_dwCost",
+	"m_tPreviousParentID",
+	"get_slot",
+	"slot",
+	"m_slot",
+	"cast_inventory_item",
+}
+
+local ITEM_CALL_PROBES = {
+	section_name = true,
+	section = true,
+	clsid = true,
+	get_slot = true,
+	cast_inventory_item = true,
+}
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function debug_print_enabled()
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 offline inventory diag | " .. fmt, ...)
+	else
+		print(string.format("~ ZHOPA2 offline inventory diag | " .. fmt, ...))
+	end
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return false, nil
+	end
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result = pcall(fn, obj, ...)
+	return ok, result
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return obj
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return id
+	end
+	ok, id = safe_call(obj, "id")
+	return ok and id or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return name
+	end
+	ok, name = safe_call(obj, "name")
+	return ok and name or nil
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	local ok, section = safe_field(obj, "section_name")
+	if ok and section ~= nil and type(section) ~= "function" then
+		return section
+	end
+	ok, section = safe_call(obj, "section_name")
+	if ok and section ~= nil then
+		return section
+	end
+	ok, section = safe_field(obj, "section")
+	if ok and section ~= nil and type(section) ~= "function" then
+		return section
+	end
+	ok, section = safe_call(obj, "section")
+	return ok and section or nil
+end
+
+local function object_clsid(obj)
+	local ok, cls = safe_field(obj, "clsid")
+	if ok and cls ~= nil and type(cls) ~= "function" then
+		return cls
+	end
+	ok, cls = safe_call(obj, "clsid")
+	return ok and cls or nil
+end
+
+local function named_id(obj_or_id)
+	local value_type = type(obj_or_id)
+	local obj
+	local id
+	if value_type == "table" or value_type == "userdata" then
+		obj = obj_or_id
+		id = object_id(obj)
+	else
+		id = tonumber(obj_or_id)
+		obj = id and alife_object and alife_object(id) or nil
+	end
+	id = object_id(obj) or id or obj_or_id
+	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id or "-"))
+end
+
+local function table_count(t)
+	local n = 0
+	for _ in pairs(t or {}) do
+		n = n + 1
+	end
+	return n
+end
+
+local function sorted_keys(t)
+	local out = {}
+	for key in pairs(t or {}) do
+		out[#out + 1] = key
+	end
+	table.sort(out, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	return out
+end
+
+local function member_server_object(member)
+	if not member then
+		return nil
+	end
+	return member.object or (member.id and alife_object and alife_object(member.id)) or nil
+end
+
+local function collect_squad_members(squad)
+	local out = {}
+	if squad and type(squad.squad_members) == "function" then
+		pcall(function()
+			for member in squad:squad_members() do
+				out[#out + 1] = member
+			end
+		end)
+	end
+	return out
+end
+
+local function collect_child_ids(se_owner)
+	local ids = {}
+	local sim = alife and alife() or nil
+	if not (se_owner and sim and type(sim.get_children) == "function") then
+		return ids, "no_get_children"
+	end
+	local ok, err = pcall(function()
+		for id in sim:get_children(se_owner) do
+			ids[#ids + 1] = tonumber(id) or id
+		end
+	end)
+	return ids, ok and nil or tostring(err)
+end
+
+local function probe_value(obj, key, call_allowed)
+	local ok, value = safe_field(obj, key)
+	if not ok then
+		return false, "field_error", nil
+	end
+	if type(value) == "function" then
+		if not call_allowed then
+			return true, "function", "<not_called>"
+		end
+		local ok_call, result = pcall(value, obj)
+		return ok_call, ok_call and "call" or "call_error", ok_call and result or tostring(result)
+	end
+	return true, "field", value
+end
+
+local function probe_write_same(obj, key)
+	local ok_read, old_value = safe_field(obj, key)
+	if not ok_read or type(old_value) == "function" or old_value == nil then
+		return false, "read_unavailable"
+	end
+	local ok_write, err = pcall(function()
+		obj[key] = old_value
+	end)
+	return ok_write, ok_write and "write_same_ok" or tostring(err)
+end
+
+local function dump_owner_probes(se_owner, prefix)
+	for _, key in ipairs(OWNER_PROBES) do
+		local ok, source, value = probe_value(se_owner, key, OWNER_CALL_PROBES[key] == true)
+		log("%s owner_probe key [%s] ok [%s] source [%s] type [%s] value [%s]",
+			prefix,
+			tostring(key),
+			tostring(ok),
+			tostring(source),
+			tostring(type(value)),
+			tostring(value)
+		)
+	end
+	local ok_write, write_result = probe_write_same(se_owner, "m_dwMoney")
+	log("%s owner_probe key [m_dwMoney_write_same] ok [%s] result [%s]", prefix, tostring(ok_write), tostring(write_result))
+end
+
+local function dump_item_probes(se_item, prefix)
+	for _, key in ipairs(ITEM_PROBES) do
+		local ok, source, value = probe_value(se_item, key, ITEM_CALL_PROBES[key] == true)
+		log("%s item_probe key [%s] ok [%s] source [%s] type [%s] value [%s]",
+			prefix,
+			tostring(key),
+			tostring(ok),
+			tostring(source),
+			tostring(type(value)),
+			tostring(value)
+		)
+	end
+	if utils_stpk and type(utils_stpk.get_item_data) == "function" then
+		local ok_data, data = pcall(utils_stpk.get_item_data, se_item)
+		log("%s item_probe key [utils_stpk.get_item_data] ok [%s] data_type [%s] condition [%s] upgrades [%s]",
+			prefix,
+			tostring(ok_data),
+			tostring(type(data)),
+			tostring(type(data) == "table" and data.condition or "-"),
+			tostring(type(data) == "table" and data.upgrades or "-")
+		)
+	end
+	if utils_stpk and type(utils_stpk.get_ammo_data) == "function" then
+		local ok_data, data = pcall(utils_stpk.get_ammo_data, se_item)
+		log("%s item_probe key [utils_stpk.get_ammo_data] ok [%s] data_type [%s] ammo_left [%s]",
+			prefix,
+			tostring(ok_data),
+			tostring(type(data)),
+			tostring(type(data) == "table" and data.ammo_left or "-")
+		)
+	end
+end
+
+local function dump_member_inventory(squad, member, member_index)
+	local se_member = member_server_object(member)
+	if not se_member then
+		log("member index [%s] no_server_object member_id [%s]", tostring(member_index), tostring(member and member.id or "-"))
+		return false
+	end
+	local member_id = object_id(se_member)
+	local prefix = string.format("squad [%s] member [%s/%s]", named_id(squad), tostring(member_index), named_id(se_member))
+	local child_ids, child_err = collect_child_ids(se_member)
+	log("%s summary online [%s] section [%s] clsid [%s] parent [%s] children [%s] child_err [%s]",
+		prefix,
+		tostring(se_member.online),
+		tostring(object_section(se_member) or "-"),
+		tostring(object_clsid(se_member) or "-"),
+		tostring(se_member.parent_id or "-"),
+		tostring(#child_ids),
+		tostring(child_err or "-")
+	)
+	dump_owner_probes(se_member, prefix)
+	for i = 1, math.min(#child_ids, MAX_ITEMS) do
+		local item_id = child_ids[i]
+		local se_item = alife_object and alife_object(item_id) or nil
+		if se_item then
+			local item_prefix = string.format("%s item [%s/%s]", prefix, tostring(i), named_id(se_item))
+			log("%s summary section [%s] clsid [%s] parent [%s] expected_parent [%s] detached [%s]",
+				item_prefix,
+				tostring(object_section(se_item) or "-"),
+				tostring(object_clsid(se_item) or "-"),
+				tostring(se_item.parent_id or "-"),
+				tostring(member_id or "-"),
+				tostring(tonumber(se_item.parent_id) == INVALID_ID)
+			)
+			dump_item_probes(se_item, item_prefix)
+		else
+			log("%s item [%s/%s] missing_alife_object", prefix, tostring(i), tostring(item_id))
+		end
+	end
+	if #child_ids > MAX_ITEMS then
+		log("%s items_truncated total [%s] shown [%s]", prefix, tostring(#child_ids), tostring(MAX_ITEMS))
+	end
+	return true
+end
+
+local function squad_online_state(squad)
+	local online = squad and squad.online
+	if type(online) == "function" then
+		local ok, value = pcall(online, squad)
+		return ok and value or nil
+	end
+	return online
+end
+
+local function squad_has_offline_member(squad)
+	local members = collect_squad_members(squad)
+	for i = 1, #members do
+		local se_member = member_server_object(members[i])
+		if se_member and se_member.online ~= true then
+			return true
+		end
+	end
+	return false
+end
+
+function M.dump()
+	if not debug_print_enabled() then
+		return false
+	end
+	local board = rawget(_G, "SIMBOARD")
+	log("begin simboard [%s] squads [%s] actor [%s]", tostring(board ~= nil), tostring(table_count(board and board.squads)), named_id(db and db.actor))
+	if not (board and board.squads) then
+		log("end no_simboard")
+		return false
+	end
+	local dumped_squads = 0
+	for _, squad_id in ipairs(sorted_keys(board.squads)) do
+		if dumped_squads >= MAX_SQUADS then
+			break
+		end
+		local squad = alife_object and alife_object(squad_id) or board.squads[squad_id]
+		if squad and squad_online_state(squad) ~= true and squad_has_offline_member(squad) then
+			dumped_squads = dumped_squads + 1
+			local members = collect_squad_members(squad)
+			log("squad [%s] index [%s] online [%s] current_smart [%s] target [%s] members [%s] task [%s]",
+				named_id(squad),
+				tostring(dumped_squads),
+				tostring(squad_online_state(squad)),
+				tostring(squad.current_smart_id or "-"),
+				tostring(squad.assigned_target_id or squad.target_smart_id or "-"),
+				tostring(#members),
+				tostring(squad.zhopa2_task or "-")
+			)
+			for i = 1, math.min(#members, MAX_MEMBERS) do
+				dump_member_inventory(squad, members[i], i)
+			end
+			if #members > MAX_MEMBERS then
+				log("squad [%s] members_truncated total [%s] shown [%s]", named_id(squad), tostring(#members), tostring(MAX_MEMBERS))
+			end
+		end
+	end
+	if dumped_squads <= 0 then
+		log("no_offline_squad_candidates")
+	end
+	log("end dumped_squads [%s]", tostring(dumped_squads))
+	return true
+end
+
+function M.dump_squad(squad, reason)
+	if not (debug_print_enabled() and squad) then
+		return false
+	end
+	local members = collect_squad_members(squad)
+	log("squad_update_dump reason [%s] squad [%s] online [%s] current_smart [%s] target [%s] members [%s] task [%s]",
+		tostring(reason or "-"),
+		named_id(squad),
+		tostring(squad_online_state(squad)),
+		tostring(squad.current_smart_id or "-"),
+		tostring(squad.assigned_target_id or squad.target_smart_id or "-"),
+		tostring(#members),
+		tostring(squad.zhopa2_task or "-")
+	)
+	for i = 1, math.min(#members, MAX_MEMBERS) do
+		dump_member_inventory(squad, members[i], i)
+	end
+	if #members > MAX_MEMBERS then
+		log("squad [%s] members_truncated total [%s] shown [%s]", named_id(squad), tostring(#members), tostring(MAX_MEMBERS))
+	end
+	return true
+end
+
+function M.dump_squad_on_update(squad)
+	if not (debug_print_enabled() and squad and squad_online_state(squad) ~= true and squad_has_offline_member(squad)) then
+		return false
+	end
+	local squad_id = object_id(squad)
+	if not squad_id then
+		return false
+	end
+	if dumped_update_squads[squad_id] then
+		return false
+	end
+	if dumped_update_count >= MAX_UPDATE_SQUADS then
+		return false
+	end
+	dumped_update_squads[squad_id] = true
+	dumped_update_count = dumped_update_count + 1
+	return M.dump_squad(squad, "sim_squad_scripted_update")
+end
+
+function M.actor_on_first_update()
+	if dumped then
+		return
+	end
+	dumped = true
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_offline_inventory_diag = M
+return M

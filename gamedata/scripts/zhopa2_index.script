@@ -82,6 +82,10 @@ local function cfg_bool(key, default)
 	return default == true
 end
 
+function M.offline_artifacts_enabled()
+	return cfg_bool("enabled", true) == true and cfg_bool("artefact_offline_enabled", true) == true
+end
+
 local function smart_blacklisted_for_squad(squad, smart, level_name)
 	local cfg = cfg_mod()
 	return cfg
@@ -211,7 +215,7 @@ end
 
 local function artifact_is_valid(id)
 	local artifact_id = tonumber(id) or id
-	if artifact_id and M.virtual_artifacts[artifact_id] then
+	if artifact_id and M.virtual_artifacts[artifact_id] and M.offline_artifacts_enabled() then
 		return true
 	end
 	local art = artifact_id and alife_object and alife_object(artifact_id) or nil
@@ -948,6 +952,9 @@ local function add_artifact_to_bucket(bucket_table, key, artifact_id)
 end
 
 local function restore_persisted_virtual_artifacts()
+	if not M.offline_artifacts_enabled() then
+		return 0
+	end
 	local store = virtual_storage_state()
 	local artifacts = store and store.artifacts or nil
 	if not artifacts then
@@ -1210,6 +1217,9 @@ local function try_spawn_virtual_artifacts(entry)
 end
 
 local function ensure_virtual_artifacts_for_levels(level_set)
+	if not M.offline_artifacts_enabled() then
+		return 0
+	end
 	for level_name in pairs(level_set or {}) do
 		local bucket = M.virtual_zones_by_level[level_name]
 		for zkey in pairs(bucket or {}) do
@@ -1222,6 +1232,9 @@ local function ensure_virtual_artifacts_for_levels(level_set)
 end
 
 local function restore_virtual_artifact_for_squad(squad, artifact_id)
+	if not M.offline_artifacts_enabled() then
+		return false
+	end
 	artifact_id = tonumber(artifact_id)
 	if not (squad and artifact_id and artifact_id < 0) then
 		return false
@@ -1283,16 +1296,25 @@ function M.register_anomaly_zone(zone, cfg_file, source)
 end
 
 function M.is_virtual_artifact(artifact_id)
+	if not M.offline_artifacts_enabled() then
+		return false
+	end
 	artifact_id = tonumber(artifact_id)
 	return artifact_id ~= nil and M.virtual_artifacts[artifact_id] ~= nil
 end
 
 function M.virtual_artifact_data(artifact_id)
+	if not M.offline_artifacts_enabled() then
+		return nil
+	end
 	artifact_id = tonumber(artifact_id)
 	return artifact_id and M.virtual_artifacts[artifact_id] or nil
 end
 
 function M.virtual_artifacts_for_zone(zone, only_reserved)
+	if not M.offline_artifacts_enabled() then
+		return {}
+	end
 	local zkey = zone_key(zone)
 	local bucket = zkey and M.zone_artifacts[zkey] or nil
 	if not bucket then
@@ -1315,6 +1337,9 @@ function M.virtual_artifacts_for_zone(zone, only_reserved)
 end
 
 function M.materialize_virtual_artifact(virtual_id, real_id, zone, section)
+	if not M.offline_artifacts_enabled() then
+		return false
+	end
 	virtual_id = tonumber(virtual_id)
 	real_id = tonumber(real_id)
 	if not (virtual_id and virtual_id < 0 and real_id and real_id > 0 and M.virtual_artifacts[virtual_id]) then
@@ -1489,6 +1514,9 @@ function M.release_artifact_reservation(squad_or_id, reason)
 end
 
 local function restore_virtual_artifact_reservations_from_squads()
+	if not M.offline_artifacts_enabled() then
+		return 0
+	end
 	local board = simboard()
 	if board and type(board.zhopa2_ensure_buckets) == "function" then
 		board:zhopa2_ensure_buckets()
@@ -1558,6 +1586,9 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 			return out
 		end
 
+		if not M.offline_artifacts_enabled() then
+			return out
+		end
 		ensure_virtual_artifacts_for_levels(level_set)
 		for smart_id, bucket in pairs(M.smart_artifacts) do
 			local smart = alife_object and alife_object(smart_id) or nil

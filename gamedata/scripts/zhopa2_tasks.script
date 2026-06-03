@@ -8,6 +8,7 @@ M.TASK_BASE_CAMPING = "BASE_CAMPING"
 M.TASK_PATROL = "PATROL"
 M.TASK_NIGHT_REST = "NIGHT_REST"
 M.TASK_ARTEFACT = "ARTEFACT"
+M.TASK_TRADE = "TRADE"
 M.TASK_HUNT = "HUNT"
 M.TASK_REVENGE = "REVENGE"
 
@@ -19,9 +20,14 @@ local ASSIGNMENTS_PER_FRAME = 1
 local HUNT_NO_TARGET_COOLDOWN_SEC = 20
 local SURGE_CHECK_CACHE_MS = 250
 local TARGET_VALID_CACHE_MS = 500
+local REST_TRADE_RETRY_MS = 5000
+local BASE_CAMPING_TRADE_RETRY_MS = 30000
+local TRADE_DEBUG_THROTTLE_MS = 10000
+local TRADE_DIAGNOSTIC_LOGGING_ENABLED = false
 local surge_cache_active = false
 local surge_cache_next = 0
 local now_ms
+local trade_debug_throttle = {}
 
 local function cfg()
 	return rawget(_G, "zhopa2_cfg")
@@ -68,6 +74,15 @@ local function artifacts_mod()
 	if not mod and require then
 		pcall(require, "zhopa2_artifacts")
 		mod = rawget(_G, "zhopa2_artifacts")
+	end
+	return mod
+end
+
+local function economy_mod()
+	local mod = rawget(_G, "zhopa2_economy")
+	if not mod and require then
+		pcall(require, "zhopa2_economy")
+		mod = rawget(_G, "zhopa2_economy")
 	end
 	return mod
 end
@@ -225,6 +240,102 @@ now_ms = function()
 	return math.floor((os and os.clock and os.clock() or 0) * 1000)
 end
 
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return obj
+	end
+	local ok, id = pcall(function()
+		return obj.id
+	end)
+	if ok and id ~= nil and type(id) ~= "function" then
+		return id
+	end
+	ok, id = pcall(function()
+		return obj:id()
+	end)
+	return ok and id or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = pcall(function()
+		return obj.name
+	end)
+	if ok and name ~= nil and type(name) ~= "function" then
+		return name
+	end
+	ok, name = pcall(function()
+		return obj:name()
+	end)
+	return ok and name or nil
+end
+
+local function named_id(obj_or_id)
+	local obj = obj_or_id
+	local id = object_id(obj)
+	if type(obj_or_id) ~= "table" and type(obj_or_id) ~= "userdata" then
+		id = tonumber(obj_or_id) or obj_or_id
+		obj = safe_alife_object(id)
+	end
+	id = object_id(obj) or id
+	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id or "-"))
+end
+
+local function debug_trade_log(squad, stage, result, detail)
+	if not TRADE_DIAGNOSTIC_LOGGING_ENABLED then
+		return
+	end
+	if not cfg_bool("debug_hud_enabled", false) then
+		return
+	end
+	if result == "no_trade_smart" then
+		return
+	end
+	local squad_id = object_id(squad) or "-"
+	local key = tostring(squad_id) .. ":" .. tostring(stage) .. ":" .. tostring(result)
+	local now = now_ms()
+	local last = trade_debug_throttle[key]
+	if last and now > 0 and now - last < TRADE_DEBUG_THROTTLE_MS then
+		return
+	end
+	trade_debug_throttle[key] = now
+	local smart_id = squad and squad.smart_id or nil
+	local target_id = squad and (squad.current_target_id or squad.assigned_target_id or squad.zhopa2_target) or nil
+	local last_trade = squad and squad.zhopa2_last_trade_result or "-"
+	local trade_detail = squad and squad.zhopa2_trade_detail or nil
+	if trade_detail and trade_detail ~= "" then
+		detail = tostring(detail or "-") .. "; " .. tostring(trade_detail)
+	end
+	if type(printf) == "function" then
+		pcall(
+			printf,
+			"~ ZHOPA2 trade debug | stage [%s] result [%s] squad [%s] task [%s] smart [%s] target [%s] last_trade [%s] detail [%s]",
+			tostring(stage or "-"),
+			tostring(result or "-"),
+			named_id(squad),
+			tostring(squad and squad.zhopa2_task or "-"),
+			named_id(smart_id),
+			named_id(target_id),
+			tostring(last_trade),
+			tostring(detail or "-")
+		)
+	end
+end
+
 local function current_frame_key()
 	local dev
 	if type(device) == "function" then
@@ -344,6 +455,7 @@ local mutant_invalid_stalker_tasks = {
 	[M.TASK_POPULATE] = true,
 	[M.TASK_NIGHT_REST] = true,
 	[M.TASK_ARTEFACT] = true,
+	[M.TASK_TRADE] = true,
 }
 
 local function mutant_has_stalker_task(squad, task)
@@ -379,6 +491,7 @@ local registry_weight_keys = {
 		["PATROL"] = { key = "stalker_patrol_weight", default = 25, enabled = "patrol_enabled", enabled_default = true },
 		["HUNT"] = { key = "stalker_hunt_weight", default = 15, enabled = "stalker_hunt_enabled", enabled_default = true },
 		["ARTEFACT"] = { key = "stalker_artefact_weight", default = 10, enabled = "artefact_enabled", enabled_default = false },
+		["TRADE"] = { key = "stalker_trade_weight", default = 10, enabled = "trade_enabled", enabled_default = true },
 	},
 	["mutant"] = {
 		["HUNT"] = { key = "mutant_hunt_weight", default = 35, enabled = "mutant_hunt_enabled", enabled_default = true },
@@ -392,7 +505,7 @@ local function registry_weight_meta(pool, name)
 	return by_pool and by_pool[name] or nil
 end
 
-local function register_task(pool, name, builder)
+local function register_task(pool, name, builder, weight_fn)
 	if type(pool) ~= "string" or type(builder) ~= "function" then
 		return
 	end
@@ -402,7 +515,7 @@ local function register_task(pool, name, builder)
 		task_registry[pool] = list
 	end
 	local meta = registry_weight_meta(pool, name) or {}
-	list[#list + 1] = { name = name, build = builder, weight_key = meta.key, weight_default = meta.default or 1, enabled_key = meta.enabled, enabled_default = meta.enabled_default }
+	list[#list + 1] = { name = name, build = builder, weight_fn = weight_fn, weight_key = meta.key, weight_default = meta.default or 1, enabled_key = meta.enabled, enabled_default = meta.enabled_default }
 end
 M.register_task = register_task
 
@@ -426,7 +539,7 @@ local function pick_weighted(list)
 	return list[#list]
 end
 
-local function registry_entry_weight(entry)
+local function registry_entry_weight(entry, squad, context)
 	if not entry then
 		return 0
 	end
@@ -438,15 +551,21 @@ local function registry_entry_weight(entry)
 	if value < 0 then
 		return 0
 	end
+	if type(entry.weight_fn) == "function" then
+		local ok, dynamic_value = pcall(function()
+			return entry.weight_fn(squad, context, value)
+		end)
+		value = ok and tonumber(dynamic_value) or 0
+	end
 	return value
 end
 
-local function pick_registry_entry(list, tried)
+local function pick_registry_entry(list, tried, squad, context)
 	local pool = {}
 	for i = 1, #list do
 		local entry = list[i]
 		if entry and not tried[entry.name] then
-			local entry_weight = registry_entry_weight(entry)
+			local entry_weight = registry_entry_weight(entry, squad, context)
 			if entry_weight > 0 then
 				pool[#pool + 1] = { entry = entry, weight = entry_weight }
 			end
@@ -468,6 +587,270 @@ local function assign_rest(squad, reason)
 		return false
 	end
 	squad:zhopa2_assign_rest(reason)
+	return true
+end
+
+local function mark_rest_trade_done(squad, result)
+	if not squad then
+		return
+	end
+	squad.zhopa2_rest_trade_state = "done"
+	squad.zhopa2_rest_trade_result = result or "done"
+	squad.zhopa2_rest_trade_next_tg = nil
+	squad.zhopa2_rest_trade_started_tg = nil
+end
+
+local function mark_rest_trade_wait(squad, result)
+	if not squad then
+		return
+	end
+	squad.zhopa2_rest_trade_state = "waiting"
+	squad.zhopa2_rest_trade_result = result or "waiting"
+	squad.zhopa2_rest_trade_next_tg = now_ms() + REST_TRADE_RETRY_MS
+end
+
+local function rest_trade_result_is_final(result)
+	return result == "traded"
+		or result == "offline_traded"
+		or result == "nothing_to_trade"
+		or result == "no_trade_budget"
+		or result == "no_offline_member"
+		or result == "offline_nothing_to_trade"
+		or result == "no_trade_smart"
+		or result == "disabled"
+		or result == "economy_missing"
+		or result == "executor_error"
+		or result == "missing_pair"
+end
+
+local function sync_rest_trade_done_from_economy(squad)
+	if not (squad and squad.zhopa2_rest_trade_state ~= "done") then
+		return false
+	end
+	local result = squad.zhopa2_last_trade_result
+	if not rest_trade_result_is_final(result) then
+		return false
+	end
+	local started_tg = tonumber(squad.zhopa2_rest_trade_started_tg) or 0
+	local finished_tg = tonumber(squad.zhopa2_last_trade_time) or 0
+	if started_tg > 0 and finished_tg > 0 and finished_tg < started_tg then
+		return false
+	end
+	mark_rest_trade_done(squad, result)
+	return true
+end
+
+local function rest_trade_smart_available(squad)
+	local economy = economy_mod()
+	if not (economy and type(economy.squad_has_trade_smart) == "function") then
+		return false, "economy_missing"
+	end
+	local ok, available = pcall(economy.squad_has_trade_smart, squad)
+	return ok and available == true, ok and "no_trade_smart" or "economy_error"
+end
+
+local function try_auto_trade_at_rest_smart(squad, reason)
+	local economy = economy_mod()
+	if not (economy and type(economy.try_auto_trade) == "function") then
+		return false, "economy_missing"
+	end
+	local ok, traded, result = pcall(economy.try_auto_trade, squad, reason, { allow_buy_without_sell = true })
+	if ok and result and squad then
+		squad.zhopa2_last_reason = result
+	end
+	return ok and traded == true, ok and result or "trade_error"
+end
+
+local function tick_rest_auto_trade(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_REST) then
+		return false
+	end
+	if sync_rest_trade_done_from_economy(squad) then
+		return false
+	end
+	if squad.zhopa2_rest_trade_state == "done" then
+		return false
+	end
+	if squad.zhopa2_rest_trade_state == "active" then
+		return true
+	end
+	if squad.zhopa2_rest_trade_next_tg and now_ms() < squad.zhopa2_rest_trade_next_tg then
+		return false
+	end
+
+	local available, available_reason = rest_trade_smart_available(squad)
+	if not available then
+		debug_trade_log(squad, "during_REST_available", available_reason, "rest_trade_smart_available=false")
+		mark_rest_trade_done(squad, available_reason)
+		return false
+	end
+
+	squad.zhopa2_rest_trade_state = "active"
+	squad.zhopa2_rest_trade_reason = "during_REST"
+	squad.zhopa2_rest_trade_started_tg = now_ms()
+	local traded, result = try_auto_trade_at_rest_smart(squad, "during_REST")
+	result = traded and "traded" or result
+	if not traded then
+		debug_trade_log(squad, "during_REST_attempt", result, "try_auto_trade=false")
+	end
+	if rest_trade_result_is_final(result) then
+		mark_rest_trade_done(squad, result)
+	else
+		mark_rest_trade_wait(squad, result)
+	end
+	return false
+end
+
+local function rest_trade_blocks_completion(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_REST) then
+		return false
+	end
+	if sync_rest_trade_done_from_economy(squad) then
+		return false
+	end
+	if squad.zhopa2_rest_trade_state == "active" then
+		return true
+	end
+	if squad.zhopa2_rest_trade_state == "waiting" then
+		return squad.zhopa2_rest_trade_result == "trade_prepared"
+			or squad.zhopa2_rest_trade_result == "queued"
+			or squad.zhopa2_rest_trade_result == "cooldown"
+	end
+	return false
+end
+
+local function try_after_night_rest_auto_trade(squad)
+	local available, available_reason = rest_trade_smart_available(squad)
+	if not available then
+		if squad then
+			squad.zhopa2_rest_trade_state = "done"
+			squad.zhopa2_rest_trade_reason = "after_NIGHT_REST"
+			squad.zhopa2_rest_trade_result = available_reason
+		end
+		debug_trade_log(squad, "after_NIGHT_REST_available", available_reason, "rest_trade_smart_available=false")
+		return false
+	end
+	local traded, result = try_auto_trade_at_rest_smart(squad, "after_NIGHT_REST")
+	if squad then
+		squad.zhopa2_rest_trade_state = "done"
+		squad.zhopa2_rest_trade_reason = "after_NIGHT_REST"
+		squad.zhopa2_rest_trade_result = traded and "traded" or result
+	end
+	if not traded then
+		debug_trade_log(squad, "after_NIGHT_REST_attempt", result, "try_auto_trade=false")
+	end
+	return traded
+end
+
+local function tick_base_camping_auto_trade(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_BASE_CAMPING) then
+		return false
+	end
+	if squad.zhopa2_base_trade_next_tg and now_ms() < squad.zhopa2_base_trade_next_tg then
+		return false
+	end
+
+	local available, available_reason = rest_trade_smart_available(squad)
+	if not available then
+		squad.zhopa2_base_trade_result = available_reason
+		squad.zhopa2_base_trade_next_tg = now_ms() + BASE_CAMPING_TRADE_RETRY_MS
+		debug_trade_log(squad, "during_BASE_CAMPING_available", available_reason, "rest_trade_smart_available=false")
+		return false
+	end
+
+	local traded, result = try_auto_trade_at_rest_smart(squad, "during_BASE_CAMPING")
+	squad.zhopa2_base_trade_result = traded and "traded" or result
+	if not traded then
+		debug_trade_log(squad, "during_BASE_CAMPING_attempt", result, "try_auto_trade=false")
+	end
+	if result == "queued" or result == "trade_slot_busy" or result == "no_online_member" or result == "no_trader" then
+		squad.zhopa2_base_trade_next_tg = now_ms() + REST_TRADE_RETRY_MS
+	else
+		squad.zhopa2_base_trade_next_tg = now_ms() + BASE_CAMPING_TRADE_RETRY_MS
+	end
+	return traded
+end
+
+local function trade_route_allowed_from_context(context)
+	local reason = context and context.assignment_reason or nil
+	return reason == "after_REST" or reason == "after_NIGHT_REST"
+end
+
+local function trade_route_task_weight(squad, context, base_weight)
+	if not trade_route_allowed_from_context(context) then
+		return 0
+	end
+	local economy = economy_mod()
+	if not (economy and type(economy.trade_route_task_weight) == "function") then
+		return 0
+	end
+	local base = tonumber(base_weight) or task_weight("stalker_trade_weight", 10)
+	local ok, weight = pcall(function()
+		return economy.trade_route_task_weight(squad, base, context)
+	end)
+	return ok and (tonumber(weight) or 0) or 0
+end
+
+local function trade_route_result_waiting(result)
+	return result == "trade_prepared"
+		or result == "queued"
+		or result == "cooldown"
+		or result == "trade_slot_busy"
+end
+
+local function mark_trade_route_wait(squad, result)
+	if not squad then
+		return
+	end
+	squad.zhopa2_trade_route_state = "waiting"
+	squad.zhopa2_trade_route_result = result or "waiting"
+	squad.zhopa2_trade_route_next_tg = now_ms() + REST_TRADE_RETRY_MS
+end
+
+local function complete_trade_route(squad, result)
+	if squad then
+		squad.zhopa2_trade_route_state = "done"
+		squad.zhopa2_trade_route_result = result or "done"
+		squad.zhopa2_trade_route_next_tg = nil
+	end
+	if squad and type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task("completed_TRADE")
+	end
+	return assign_rest(squad, "after_TRADE")
+end
+
+local function sync_trade_route_done_from_economy(squad)
+	if not (squad and squad.zhopa2_last_trade_reason == "during_TRADE") then
+		return false
+	end
+	local result = squad.zhopa2_last_trade_result
+	return rest_trade_result_is_final(result)
+end
+
+local function tick_trade_route(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_TRADE) then
+		return false
+	end
+	if not (type(squad.zhopa2_task_completed) == "function" and squad:zhopa2_task_completed()) then
+		return false
+	end
+	if sync_trade_route_done_from_economy(squad) then
+		complete_trade_route(squad, squad.zhopa2_last_trade_result)
+		return true
+	end
+	if squad.zhopa2_trade_route_next_tg and now_ms() < squad.zhopa2_trade_route_next_tg then
+		return true
+	end
+
+	local traded, result = try_auto_trade_at_rest_smart(squad, "during_TRADE")
+	result = traded and "traded" or result
+	if rest_trade_result_is_final(result) then
+		complete_trade_route(squad, result)
+	elseif trade_route_result_waiting(result) then
+		mark_trade_route_wait(squad, result)
+	else
+		complete_trade_route(squad, result or "trade_failed")
+	end
 	return true
 end
 
@@ -611,6 +994,25 @@ local function build_stalker_artefact(squad)
 	return choice
 end
 
+local function build_stalker_trade(squad, context)
+	if not (cfg_bool("trade_enabled", true) and trade_route_allowed_from_context(context)) then
+		return nil
+	end
+	local economy = economy_mod()
+	if not (economy and type(economy.pick_trade_route_smart) == "function") then
+		return nil
+	end
+	local weight = trade_route_task_weight(squad, context, task_weight("stalker_trade_weight", 10))
+	if weight <= 0 then
+		return nil
+	end
+	local ok, smart, reason = pcall(economy.pick_trade_route_smart, squad, { level_mode = "current_or_neighbor" })
+	if not (ok and smart and smart.id) then
+		return nil
+	end
+	return make_choice(M.TASK_TRADE, smart.id, weight, reason or "trade_route")
+end
+
 local function build_mutant_hunt(squad)
 	local p = perception()
 	if not (cfg_bool("mutant_hunt_enabled", true) and p and p.pick_hunt_target) then
@@ -657,21 +1059,22 @@ register_task("stalker", M.TASK_POPULATE, build_stalker_populate)
 register_task("stalker", M.TASK_PATROL, build_stalker_patrol)
 register_task("stalker", M.TASK_HUNT, build_stalker_hunt)
 register_task("stalker", M.TASK_ARTEFACT, build_stalker_artefact)
+register_task("stalker", M.TASK_TRADE, build_stalker_trade, trade_route_task_weight)
 register_task("mutant", M.TASK_HUNT, build_mutant_hunt)
 register_task("mutant", M.TASK_PATROL, build_mutant_patrol)
 register_task("mutant", M.TASK_EXPLORE, build_mutant_explore)
 
-local function select_from_registry(pool, squad)
+local function select_from_registry(pool, squad, context)
 	local list = task_registry[pool] or {}
 	local attempts = TASK_SELECT_ATTEMPTS
 	local tried = {}
 	for i = 1, math.min(#list, attempts) do
-		local entry = pick_registry_entry(list, tried)
+		local entry = pick_registry_entry(list, tried, squad, context)
 		if not entry then
 			break
 		end
 		tried[entry.name] = true
-		local choice = entry.build(squad)
+		local choice = entry.build(squad, context)
 		if choice then
 			return choice
 		end
@@ -681,7 +1084,7 @@ end
 
 local select_stalker_night_rest
 
-local function select_stalker_task(squad)
+local function select_stalker_task(squad, reason)
 	if is_monster_squad(squad) then
 		return nil
 	end
@@ -696,7 +1099,7 @@ local function select_stalker_task(squad)
 		return night_rest
 	end
 
-	return select_from_registry("stalker", squad)
+	return select_from_registry("stalker", squad, { assignment_reason = reason })
 end
 
 function select_stalker_night_rest(squad)
@@ -739,7 +1142,7 @@ function select_stalker_night_rest(squad)
 	return nil
 end
 
-local function select_mutant_task(squad)
+local function select_mutant_task(squad, reason)
 	local force_target = force_exit_target(squad)
 	if force_target then
 		return make_choice(M.TASK_FORCE_EXIT, force_target, 100, "blacklist_exit")
@@ -753,7 +1156,7 @@ local function select_mutant_task(squad)
 		return build_mutant_hunt(squad)
 	end
 
-	return select_from_registry("mutant", squad)
+	return select_from_registry("mutant", squad, { assignment_reason = reason })
 end
 
 local function mutant_night_hunt_only(squad)
@@ -1519,7 +1922,7 @@ function M.assign_next_task(squad, reason)
 	if not assignment_budget_open(squad) then
 		return
 	end
-	local choice = is_monster_squad(squad) and select_mutant_task(squad) or select_stalker_task(squad)
+	local choice = is_monster_squad(squad) and select_mutant_task(squad, reason) or select_stalker_task(squad, reason)
 	if not choice then
 		if mutant_night_hunt_only(squad) then
 			if not task_no_target_cooldown_active(squad, "HUNT") then
@@ -1665,6 +2068,17 @@ function M.update_squad(squad, memory)
 		end
 	end
 
+	if squad.zhopa2_task == M.TASK_REST then
+		tick_rest_auto_trade(squad)
+	elseif squad.zhopa2_task == M.TASK_BASE_CAMPING then
+		tick_base_camping_auto_trade(squad)
+	elseif squad.zhopa2_task == M.TASK_TRADE then
+		if tick_trade_route(squad) then
+			update_debug(squad)
+			return true
+		end
+	end
+
 	if squad.zhopa2_task and type(squad.zhopa2_target_is_alive) == "function" and not squad:zhopa2_target_is_alive() then
 		if squad.zhopa2_task == M.TASK_HUNT or squad.zhopa2_task == M.TASK_REVENGE then
 			if squad.zhopa2_task == M.TASK_REVENGE then
@@ -1683,6 +2097,10 @@ function M.update_squad(squad, memory)
 	end
 
 	if squad.zhopa2_task and type(squad.zhopa2_task_completed) == "function" and squad:zhopa2_task_completed() then
+		if rest_trade_blocks_completion(squad) then
+			update_debug(squad)
+			return true
+		end
 		local completed = squad.zhopa2_task
 		local completed_target = squad.zhopa2_target
 		if completed ~= M.TASK_REST and completed ~= M.TASK_HUNT and completed ~= M.TASK_REVENGE and mem and type(mem.add_recent_smart) == "function" then
@@ -1695,6 +2113,9 @@ function M.update_squad(squad, memory)
 		elseif completed == M.TASK_POPULATE then
 			complete_populate(squad, completed_target)
 		else
+			if completed == M.TASK_NIGHT_REST then
+				try_after_night_rest_auto_trade(squad)
+			end
 			if type(squad.zhopa2_clear_task) == "function" then
 				squad:zhopa2_clear_task("completed_" .. tostring(completed))
 			end

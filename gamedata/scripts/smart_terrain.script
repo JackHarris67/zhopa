@@ -189,6 +189,83 @@ local function zhopa2_targeted_gather_blocks_job(smart, npc_info)
 end
 -- ZHOPA2 END
 
+-- ZHOPA2 BEGIN: keep prepared online trade NPCs on their concrete trade slot.
+local function zhopa2_clear_forced_trade_job(st)
+	if st then
+		st.zhopa2_trade_force_job_section = nil
+		st.zhopa2_trade_force_until = nil
+	end
+end
+
+local function zhopa2_reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section)
+	if not (smart and npc_info and st and npc_id and force_section) then
+		return false
+	end
+	local owner = smart.npc_by_job_section and tonumber(smart.npc_by_job_section[force_section]) or nil
+	if owner and owner ~= tonumber(npc_id) then
+		return false
+	end
+	local job = smart.find_job_by_section and smart:find_job_by_section(force_section) or nil
+	if not job then
+		return false
+	end
+	if smart.npc_by_job_section then
+		for sec,npcid in pairs(smart.npc_by_job_section) do
+			if tonumber(npcid) == tonumber(npc_id) and sec ~= force_section then
+				smart.npc_by_job_section[sec] = nil
+			end
+		end
+		smart.npc_by_job_section[force_section] = npc_id
+	end
+	npc_info.job = job
+	npc_info.begin_job = false
+	npc_info.current_index = 1
+	if st.object and smart.setup_logic then
+		npc_info.begin_job = true
+		empty_table(db.offline_objects[npc_id])
+		smart:setup_logic(st.object)
+	end
+	return true
+end
+
+local function zhopa2_forced_trade_blocks_job(smart, npc_info)
+	if not (smart and npc_info and npc_info.se_obj and db and db.storage) then
+		return false
+	end
+	local npc_id = npc_info.se_obj.id
+	local st = npc_id and db.storage[npc_id] or nil
+	local force_section = st and st.zhopa2_trade_force_job_section or nil
+	if type(force_section) ~= "string" or force_section == "" then
+		return false
+	end
+	if st.has_items_to_sell ~= true then
+		zhopa2_clear_forced_trade_job(st)
+		return false
+	end
+	local now = time_global and time_global() or 0
+	if tonumber(st.zhopa2_trade_force_until or 0) <= now then
+		zhopa2_clear_forced_trade_job(st)
+		return false
+	end
+	local job = npc_info.job
+	if not (job and job.section == force_section) then
+		if zhopa2_reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section) then
+			return true
+		end
+		zhopa2_clear_forced_trade_job(st)
+		return false
+	end
+	if smart.npc_by_job_section and tonumber(smart.npc_by_job_section[force_section]) ~= tonumber(npc_id) then
+		if zhopa2_reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section) then
+			return true
+		end
+		zhopa2_clear_forced_trade_job(st)
+		return false
+	end
+	return true
+end
+-- ZHOPA2 END
+
 function arrived_to_smart(se_obj, smart)
 	--utils_obj.debug_nearest(se_obj,"check arrived_to_smart %s",smart:name())
 	local squad = se_obj.group_id and se_obj.group_id ~= 65535 and alife_object(se_obj.group_id)
@@ -700,6 +777,10 @@ function se_smart_terrain:load_jobs()
 			end
 		end
 	end
+	if SIMBOARD and type(SIMBOARD.zhopa2_register_trade_smart) == "function" then
+		-- ZHOPA2 hook: refresh trade-smart bucket after actor-level jobs are fully loaded.
+		SIMBOARD:zhopa2_register_trade_smart(self)
+	end
 	-- ZHOPA2 END
 end
 
@@ -778,6 +859,9 @@ function se_smart_terrain:select_npc_job(npc_info,now,surge_started)
 	end
 
 	if zhopa2_targeted_gather_blocks_job(self, npc_info) then
+		return
+	end
+	if zhopa2_forced_trade_blocks_job(self, npc_info) then
 		return
 	end
 

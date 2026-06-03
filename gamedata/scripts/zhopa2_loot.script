@@ -72,8 +72,20 @@ local function alife_sim()
 	return ok and sim or nil
 end
 
+function M.online_enabled()
+	return cfg_bool("enabled", true) == true and cfg_bool("loot_enabled", true) == true
+end
+
+function M.offline_enabled()
+	return cfg_bool("enabled", true) == true and cfg_bool("loot_offline_enabled", true) == true
+end
+
+function M.offline_real_enabled()
+	return M.offline_enabled() == true and cfg_bool("loot_offline_real_enabled", true) == true
+end
+
 function M.enabled()
-	return cfg_bool("enabled", true) == true and cfg_bool("loot_enabled", false) == true
+	return M.online_enabled()
 end
 
 local function valid_id(id)
@@ -530,7 +542,7 @@ local function is_stalker_server_object(obj)
 end
 
 local function offline_squad_can_loot(squad)
-	if not (M.enabled() and squad and squad.zhopa2_managed == true) then
+	if not (M.offline_real_enabled() and squad and squad.zhopa2_managed == true) then
 		return false
 	end
 	if squad.player_id == "actor" or is_monster_player_id(squad.player_id) then
@@ -1502,11 +1514,11 @@ function M.record_loot(npc, source, item, value, reason)
 end
 
 function M.record_offline_combat_loot(squad, target, killed_count, reason)
-	if not (M.enabled() and squad and squad.zhopa2_managed == true) then
+	if not (M.offline_enabled() and squad and squad.zhopa2_managed == true) then
 		return false
 	end
 	-- Real offline loot is handled before sim_offline_combat calls on_death().
-	if cfg_bool("loot_offline_real_enabled", true) == true then
+	if M.offline_real_enabled() == true then
 		if target and squad_npc_count(target) <= 0 then
 			return transfer_remaining_artifact_cargo(squad, target, reason or "offline_artifact_cargo_loot")
 		end

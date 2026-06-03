@@ -96,6 +96,10 @@ local function zhopa2_debug_print_enabled()
 	return zhopa2_cfg_bool("debug_hud_enabled", false) == true
 end
 
+local function zhopa2_offline_inventory_diag_mod()
+	return rawget(_G, "zhopa2_offline_inventory_diag")
+end
+
 local function zhopa2_is_monster_squad(squad)
 	local perception = zhopa2_perception_mod()
 	if perception and type(perception.is_monster_squad) == "function" then
@@ -299,6 +303,14 @@ function sim_squad_scripted:zhopa2_cleanup_debug()
 	end
 end
 
+function sim_squad_scripted:zhopa2_debug_offline_inventory_update_dump()
+	-- Offline inventory dump is intentionally disabled outside focused diagnostics.
+	-- local diag = zhopa2_offline_inventory_diag_mod()
+	-- if diag and type(diag.dump_squad_on_update) == "function" then
+	-- 	pcall(diag.dump_squad_on_update, self)
+	-- end
+end
+
 function sim_squad_scripted:zhopa2_unregister_base_camping_registry()
 	local idx = zhopa2_index_mod()
 	if idx and type(idx.unregister_base_camping_target) == "function" then
@@ -395,6 +407,18 @@ function sim_squad_scripted:zhopa2_clear_task(reason)
 	self.zhopa2_artifact_id = nil
 	self.zhopa2_artifact_section = nil
 	self.zhopa2_artifact_collect_started = nil
+	self.zhopa2_rest_trade_state = nil
+	self.zhopa2_rest_trade_reason = nil
+	self.zhopa2_rest_trade_result = nil
+	self.zhopa2_rest_trade_next_tg = nil
+	self.zhopa2_base_trade_result = nil
+	self.zhopa2_base_trade_next_tg = nil
+	self.zhopa2_trade_route_state = nil
+	self.zhopa2_trade_route_result = nil
+	self.zhopa2_trade_route_next_tg = nil
+	self.zhopa2_trade_queue_state = nil
+	self.zhopa2_trade_queue_smart = nil
+	self.zhopa2_trade_queue_reason = nil
 	self:zhopa2_release_task_rush()
 	self:zhopa2_sync_base_camping_registry()
 	self:zhopa2_cleanup_debug()
@@ -465,6 +489,18 @@ function sim_squad_scripted:zhopa2_assign_task(task, target_id, duration_sec, re
 	self.zhopa2_last_reason = reason or task
 	self.zhopa2_managed = true
 	self.zhopa2_hunt_prepared_target = nil
+	self.zhopa2_rest_trade_state = nil
+	self.zhopa2_rest_trade_reason = nil
+	self.zhopa2_rest_trade_result = nil
+	self.zhopa2_rest_trade_next_tg = nil
+	self.zhopa2_base_trade_result = nil
+	self.zhopa2_base_trade_next_tg = nil
+	self.zhopa2_trade_route_state = nil
+	self.zhopa2_trade_route_result = nil
+	self.zhopa2_trade_route_next_tg = nil
+	self.zhopa2_trade_queue_state = nil
+	self.zhopa2_trade_queue_smart = nil
+	self.zhopa2_trade_queue_reason = nil
 	self.scripted_target = self.zhopa2_target
 	self:zhopa2_sync_base_camping_registry()
 	self:zhopa2_sync_task_rush()
@@ -823,6 +859,8 @@ function sim_squad_scripted:update()
 		SendScriptCallback("squad_on_after_level_change",self, self.level_name, cur_lvl)
 		self.level_name = cur_lvl
 	end
+	-- ZHOPA2 hook: optional debugscripts probe after this squad has actually ticked.
+	self:zhopa2_debug_offline_inventory_update_dump()
 	--utils_data.debug_write("sim_squad_scripted:update END 2")
 end
 
