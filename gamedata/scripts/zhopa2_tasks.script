@@ -15,6 +15,9 @@ M.TASK_STORY_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
 
 local ACTOR_TARGET_ID = AC_ID or 0
 local REVENGE_GOODWILL = -3000
+local REVENGE_RELATION_SCOPE_REFRESH_MS = 1000
+local REVENGE_RELATION_SCOPE_MAX_SQUADS = 32
+local REVENGE_RELATION_SCOPE_MAX_MEMBERS = 128
 local TASK_SELECT_ATTEMPTS = 2
 local ASSIGNMENTS_PER_FRAME = 1
 local HUNT_NO_TARGET_COOLDOWN_SEC = 20
@@ -29,6 +32,7 @@ local surge_cache_next = 0
 local now_ms
 local trade_debug_throttle = {}
 local cfg_require_attempted = false
+local actor_revenge_relation_scopes = {}
 
 local function cfg()
 	local c = rawget(_G, "zhopa2_cfg")
@@ -90,6 +94,15 @@ local function economy_mod()
 	if not mod and require then
 		pcall(require, "zhopa2_economy")
 		mod = rawget(_G, "zhopa2_economy")
+	end
+	return mod
+end
+
+local function index_mod()
+	local mod = rawget(_G, "zhopa2_index")
+	if not mod and require then
+		pcall(require, "zhopa2_index")
+		mod = rawget(_G, "zhopa2_index")
 	end
 	return mod
 end
@@ -1679,7 +1692,8 @@ local function force_member_to_actor(member)
 	local applied = false
 	local obj = member_online_object(member)
 	if obj and db and db.actor and game_object then
-		applied = set_online_relation(obj, db.actor, game_object.enemy, REVENGE_GOODWILL) or applied
+		force_goodwill(obj, REVENGE_GOODWILL, db.actor)
+		applied = online_relation_matches(obj, db.actor, game_object.enemy) or applied
 	end
 	return applied
 end
@@ -1717,6 +1731,267 @@ local function actor_on_squad_level(squad)
 	return squad and squad.online == true
 end
 
+local function current_actor_id()
+	local actor = db and db.actor or nil
+	if actor and type(actor.id) == "function" then
+		local ok, id = pcall(actor.id, actor)
+		if ok and id ~= nil then
+			return tonumber(id) or id
+		end
+	end
+	return ACTOR_TARGET_ID
+end
+
+local function current_actor_level_name()
+	local p = perception()
+	if p and db and db.actor and type(p.obj_level) == "function" then
+		local ok, level_name = pcall(p.obj_level, db.actor)
+		if ok and level_name then
+			return level_name
+		end
+	end
+	if level and type(level.name) == "function" then
+		local ok, level_name = pcall(level.name)
+		if ok and level_name then
+			return level_name
+		end
+	end
+	return nil
+end
+
+local function actor_community_goodwill(community)
+	if not (community and relation_registry and type(relation_registry.community_goodwill) == "function") then
+		return nil
+	end
+	local ok, goodwill = pcall(relation_registry.community_goodwill, community, current_actor_id())
+	return ok and tonumber(goodwill) or nil
+end
+
+local function set_actor_community_goodwill(community, goodwill)
+	if not (community and goodwill ~= nil and relation_registry and type(relation_registry.set_community_goodwill) == "function") then
+		return false
+	end
+	local ok = pcall(relation_registry.set_community_goodwill, community, current_actor_id(), goodwill)
+	return ok == true
+end
+
+local function online_actor_goodwill(obj)
+	if not (obj and db and db.actor) then
+		return nil
+	end
+	if type(obj.general_goodwill) == "function" then
+		local ok, goodwill = pcall(obj.general_goodwill, obj, db.actor)
+		if ok and goodwill ~= nil then
+			return tonumber(goodwill) or nil
+		end
+	end
+	if type(obj.goodwill) == "function" then
+		local ok, goodwill = pcall(obj.goodwill, obj, db.actor)
+		return ok and tonumber(goodwill) or nil
+	end
+	return nil
+end
+
+local function restore_member_actor_goodwill(member_id, goodwill)
+	if not (member_id and goodwill ~= nil) then
+		return false
+	end
+	local obj = member_online_object({ id = member_id })
+	if obj and db and db.actor then
+		return force_goodwill(obj, goodwill, db.actor)
+	end
+	local se_obj = member_inventory_owner_server_object({ id = member_id })
+	return se_obj and force_goodwill(se_obj, goodwill, current_actor_id()) or false
+end
+
+local function squad_member_id_set(squad)
+	local ids = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return ids
+	end
+	for member in squad:squad_members() do
+		local id = member and member.id or nil
+		if id then
+			ids[id] = true
+		end
+	end
+	return ids
+end
+
+local function snapshot_member_actor_goodwill(member, bucket)
+	if not (member and member.id and bucket and bucket[member.id] == nil) then
+		return false
+	end
+	local obj = member_online_object(member)
+	local goodwill = online_actor_goodwill(obj)
+	if goodwill == nil then
+		return false
+	end
+	bucket[member.id] = goodwill
+	return true
+end
+
+local function for_each_actor_level_squad(fn)
+	if type(fn) ~= "function" then
+		return
+	end
+	local processed = 0
+	local level_name = current_actor_level_name()
+	local index = index_mod()
+	if level_name and index and type(index.squads_on_levels) == "function" then
+		local ok, candidates = pcall(index.squads_on_levels, { level_name }, REVENGE_RELATION_SCOPE_MAX_SQUADS)
+		candidates = ok and candidates or nil
+		if type(candidates) == "table" then
+			for i = 1, #candidates do
+				local squad = candidates[i]
+				if squad then
+					processed = processed + 1
+					if fn(squad) == true or processed >= REVENGE_RELATION_SCOPE_MAX_SQUADS then
+						return
+					end
+				end
+			end
+			return
+		end
+	end
+	if not (SIMBOARD and SIMBOARD.squads) then
+		return
+	end
+	for squad_id in pairs(SIMBOARD.squads) do
+		local squad = safe_alife_object(squad_id)
+		if squad and actor_on_squad_level(squad) then
+			processed = processed + 1
+			if fn(squad) == true or processed >= REVENGE_RELATION_SCOPE_MAX_SQUADS then
+				return
+			end
+		end
+	end
+end
+
+local function snapshot_actor_revenge_relation_scope(squad, scope)
+	if not (squad and scope and scope.community) then
+		return false
+	end
+	scope.revenge_member_ids = squad_member_id_set(squad)
+	scope.revenge_personal_goodwill = scope.revenge_personal_goodwill or {}
+	for member in squad:squad_members() do
+		snapshot_member_actor_goodwill(member, scope.revenge_personal_goodwill)
+	end
+
+	scope.personal_goodwill = scope.personal_goodwill or {}
+	local captured = 0
+	local squad_id = object_id(squad)
+	for_each_actor_level_squad(function(other)
+		local other_id = object_id(other)
+		if other_id == squad_id or squad_community(other) ~= scope.community or type(other.squad_members) ~= "function" then
+			return false
+		end
+		if other.zhopa2_task == M.TASK_REVENGE and tonumber(other.zhopa2_target) == ACTOR_TARGET_ID then
+			return false
+		end
+		for member in other:squad_members() do
+			local id = member and member.id or nil
+			if id and not scope.revenge_member_ids[id] and snapshot_member_actor_goodwill(member, scope.personal_goodwill) then
+				captured = captured + 1
+				if captured >= REVENGE_RELATION_SCOPE_MAX_MEMBERS then
+					return true
+				end
+			end
+		end
+		return false
+	end)
+	return true
+end
+
+local function ensure_actor_revenge_relation_scope(squad)
+	local squad_id = object_id(squad)
+	if not squad_id then
+		return nil
+	end
+	local scope = actor_revenge_relation_scopes[squad_id]
+	if not scope then
+		local community = squad_community(squad)
+		scope = {
+			community = community,
+			community_goodwill = actor_community_goodwill(community),
+			personal_goodwill = {},
+			revenge_personal_goodwill = {},
+			revenge_member_ids = {},
+			next_restore = 0,
+		}
+		actor_revenge_relation_scopes[squad_id] = scope
+	end
+	if scope.community and squad.zhopa2_revenge_actor_community == nil then
+		squad.zhopa2_revenge_actor_community = scope.community
+	end
+	if scope.community_goodwill ~= nil and squad.zhopa2_revenge_actor_community_goodwill == nil then
+		squad.zhopa2_revenge_actor_community_goodwill = scope.community_goodwill
+	end
+	snapshot_actor_revenge_relation_scope(squad, scope)
+	return scope
+end
+
+local function stored_actor_revenge_relation_scope(squad)
+	local squad_id = object_id(squad)
+	if not squad_id then
+		return nil
+	end
+	local scope = actor_revenge_relation_scopes[squad_id]
+	if scope then
+		return scope
+	end
+	local community = squad.zhopa2_revenge_actor_community
+	local goodwill = tonumber(squad.zhopa2_revenge_actor_community_goodwill)
+	if not (community and goodwill ~= nil) then
+		return nil
+	end
+	scope = {
+		community = community,
+		community_goodwill = goodwill,
+		personal_goodwill = {},
+		revenge_personal_goodwill = {},
+		revenge_member_ids = squad_member_id_set(squad),
+		next_restore = 0,
+	}
+	actor_revenge_relation_scopes[squad_id] = scope
+	return scope
+end
+
+local function restore_actor_revenge_relation_scope(squad, force, include_revenge)
+	local scope = (force == true) and stored_actor_revenge_relation_scope(squad) or actor_revenge_relation_scopes[object_id(squad)]
+	if not scope then
+		return false
+	end
+	local now = now_ms()
+	if force ~= true and now > 0 and now < (scope.next_restore or 0) then
+		return false
+	end
+	scope.next_restore = now + REVENGE_RELATION_SCOPE_REFRESH_MS
+	local restored = set_actor_community_goodwill(scope.community, scope.community_goodwill)
+	for member_id, goodwill in pairs(scope.personal_goodwill or {}) do
+		if not (scope.revenge_member_ids and scope.revenge_member_ids[member_id]) then
+			restored = restore_member_actor_goodwill(member_id, goodwill) or restored
+		end
+	end
+	if include_revenge == true then
+		for member_id, goodwill in pairs(scope.revenge_personal_goodwill or {}) do
+			restored = restore_member_actor_goodwill(member_id, goodwill) or restored
+		end
+	end
+	return restored
+end
+
+local function clear_actor_revenge_relation_scope(squad)
+	local squad_id = object_id(squad)
+	if squad_id then
+		actor_revenge_relation_scopes[squad_id] = nil
+	end
+	if squad then
+		squad.zhopa2_revenge_actor_community = nil
+		squad.zhopa2_revenge_actor_community_goodwill = nil
+	end
+end
+
 local function same_level_for_hostility(squad, target)
 	local p = perception()
 	if p and type(p.obj_same_level) == "function" then
@@ -1736,6 +2011,9 @@ function M.apply_revenge_hostility(squad)
 		if not actor_on_squad_level(squad) then
 			return false
 		end
+		restore_actor_revenge_relation_scope(squad, false, false)
+		ensure_actor_revenge_relation_scope(squad)
+		restore_actor_revenge_relation_scope(squad, false, false)
 		for member in squad:squad_members() do
 			applied = force_member_to_actor(member) or applied
 		end
@@ -1773,6 +2051,10 @@ function M.release_revenge_hostility(squad)
 		return false
 	end
 	local released = squad.zhopa2_revenge_hostility_target ~= nil or squad.zhopa2_revenge_hostility_actor ~= nil
+	if squad.zhopa2_revenge_hostility_actor == true or tonumber(squad.zhopa2_target) == ACTOR_TARGET_ID then
+		restore_actor_revenge_relation_scope(squad, true, true)
+		clear_actor_revenge_relation_scope(squad)
+	end
 	squad.zhopa2_revenge_hostility_target = nil
 	squad.zhopa2_revenge_hostility_actor = nil
 	return released
@@ -1917,6 +2199,9 @@ function M.revenge_target_valid(squad)
 		local script_target, route_reason = p.revenge_script_target(squad, target, { allow_cross_level = true })
 		if not script_target then
 			target_valid_cache_clear(squad)
+			if route_reason == "revenge_target_invalid" then
+				return false, "revenge_target_invalid"
+			end
 			return revenge_wait_route(squad, route_reason or "revenge_target_wait_route")
 		end
 	end
@@ -2337,6 +2622,11 @@ function M.get_script_target(squad)
 					squad.zhopa2_last_reason = route_reason
 				end
 				return script_target
+			end
+			if route_reason == "revenge_target_invalid" then
+				squad.zhopa2_last_reason = "revenge_target_invalid"
+				squad.zhopa2_last_result = "revenge_target_invalid"
+				return nil
 			end
 			return revenge_script_target_fallback(squad, route_reason or "revenge_target_wait_route")
 		end

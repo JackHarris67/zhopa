@@ -39,20 +39,15 @@ local OPTION_DEFS = {
 	mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
 	target_sync_enabled = { type = "check", val = 1, def = true },
 	online_intent_enforce_enabled = { type = "check", val = 1, def = true },
-	story_psy_watchdog_enabled = { type = "check", val = 1, def = true, text = "ui_mcm_zhopa2_story_psy_watchdog_enabled", hint = "ui_mcm_zhopa2_story_psy_watchdog_enabled_desc" },
-	story_north_migration_enabled = { type = "check", val = 1, def = true, text = "ui_mcm_zhopa2_story_north_migration_enabled", hint = "ui_mcm_zhopa2_story_north_migration_enabled_desc" },
-	story_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 50, text = "ui_mcm_zhopa2_story_north_migration_percent", hint = "ui_mcm_zhopa2_story_north_migration_percent_desc" },
+	story_psy_watchdog_enabled = { type = "check", val = 1, def = true },
+	story_north_migration_enabled = { type = "check", val = 1, def = true },
+	story_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 50 },
 	trade_enabled = { type = "check", val = 1, def = true },
 	service_filler_enabled = { type = "check", val = 1, def = true },
 	loot_enabled = { type = "check", val = 1, def = true },
 	loot_offline_enabled = { type = "check", val = 1, def = true },
 	loot_offline_real_enabled = { type = "check", val = 1, def = true },
 }
-
-for key, def in pairs(OPTION_DEFS) do
-	def.text = def.text or ("ui_mcm_zhopa2_" .. key)
-	def.hint = def.hint or ("ui_mcm_zhopa2_" .. key .. "_desc")
-end
 
 local PANELS = {
 	{

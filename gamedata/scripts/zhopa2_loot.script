@@ -1267,7 +1267,10 @@ local function corpse_has_quest_item(corpse)
 	end
 	local has_quest = false
 	local function inspect(owner, item)
-		if item and section_is_quest(object_section(item)) then
+		if has_quest or not item then
+			return
+		end
+		if section_is_quest(object_section(item)) or object_is_story(item) then
 			has_quest = true
 		end
 	end

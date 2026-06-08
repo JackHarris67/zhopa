@@ -17,8 +17,6 @@ local function clone_option(meta, key)
 		node[k] = v
 	end
 	node.id = key
-	node.text = node.text or key
-	node.hint = node.hint or key
 	return node
 end
 

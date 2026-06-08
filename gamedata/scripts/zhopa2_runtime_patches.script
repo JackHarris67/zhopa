@@ -2035,18 +2035,31 @@ local function forced_trade_blocks_job(smart, npc_info)
 end
 
 local function try_service_fallback_job(smart, npc_info)
-	if not (smart and npc_info and not npc_info.job and npc_info.stype == 0) then
+	if not (smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then
 		return false
 	end
 	local jobs = smart.stalker_jobs
 	if type(jobs) ~= "table" then
 		return false
 	end
+	local tonum = tonumber
+	local npc_id = tonum(npc_info.se_obj.id) or npc_info.se_obj.id
 	for i = 1, #jobs do
 		local job = jobs[i]
 		local owner = smart.npc_by_job_section and smart.npc_by_job_section[job.section] or nil
-		if (owner == nil or tonumber(owner) == tonumber(npc_info.se_obj.id)) and service_job_fallback(npc_info, job, smart) then
+		local owner_id = tonum(owner) or owner
+		if owner and not (smart.npc_info and smart.npc_info[owner_id]) then
+			smart.npc_by_job_section[job.section] = nil
+			owner = nil
+			owner_id = nil
+		end
+		if (owner == nil or owner_id == npc_id) and service_job_fallback(npc_info, job, smart) then
 			if smart.npc_by_job_section then
+				for sec, npcid in pairs(smart.npc_by_job_section) do
+					if tonum(npcid) == npc_id and sec ~= job.section then
+						smart.npc_by_job_section[sec] = nil
+					end
+				end
 				smart.npc_by_job_section[job.section] = npc_info.se_obj.id
 			end
 			npc_info.job = job
@@ -2054,6 +2067,32 @@ local function try_service_fallback_job(smart, npc_info)
 			npc_info.current_index = 1
 			local st = smart.online and db and db.storage and db.storage[npc_info.se_obj.id]
 			if st and st.object then
+				if npc_info.begin_job ~= true or st.section_logic ~= job.section then
+					npc_info.begin_job = true
+					empty_table(db.offline_objects[npc_info.se_obj.id])
+					smart:setup_logic(st.object)
+				end
+			end
+			return true
+		end
+	end
+	return false
+end
+
+local function ensure_service_job(smart, npc_info)
+	if not (smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then
+		return false
+	end
+	local tonum = tonumber
+	local npc_id = tonum(npc_info.se_obj.id) or npc_info.se_obj.id
+	if npc_info.job and service_job_fallback(npc_info, npc_info.job, smart) then
+		local owner = smart.npc_by_job_section and smart.npc_by_job_section[npc_info.job.section] or nil
+		if owner == nil or (tonum(owner) or owner) == npc_id then
+			if smart.npc_by_job_section and owner == nil then
+				smart.npc_by_job_section[npc_info.job.section] = npc_info.se_obj.id
+			end
+			local st = smart.online and db and db.storage and db.storage[npc_info.se_obj.id]
+			if st and st.object and (npc_info.begin_job ~= true or st.section_logic ~= npc_info.job.section) then
 				npc_info.begin_job = true
 				empty_table(db.offline_objects[npc_info.se_obj.id])
 				smart:setup_logic(st.object)
@@ -2061,7 +2100,7 @@ local function try_service_fallback_job(smart, npc_info)
 			return true
 		end
 	end
-	return false
+	return try_service_fallback_job(smart, npc_info)
 end
 
 local function refresh_job_capacity(smart)
@@ -2121,9 +2160,12 @@ function M.patch_smart_terrain()
 			if forced_trade_blocks_job(self, npc_info) then
 				return
 			end
+			if ensure_service_job(self, npc_info) then
+				return true
+			end
 			local result = { original(self, npc_info, ...) }
-			if not npc_info.job then
-				try_service_fallback_job(self, npc_info)
+			if ensure_service_job(self, npc_info) then
+				return true
 			end
 			return unpack(result)
 		end
@@ -4095,6 +4137,57 @@ local function zhopa2_mark_corpse_checked(corpse_id)
 	end
 end
 
+local function zhopa2_reject_corpse_candidate(mod, st, corpse_id)
+	local tonum = tonumber
+	corpse_id = tonum(corpse_id)
+	if not corpse_id then
+		return
+	end
+	if db and db.storage and db.storage[corpse_id] then
+		db.storage[corpse_id].corpse_already_selected = nil
+	end
+	if st then
+		if type(st.memory) == "table" then
+			local write = 1
+			local removed = false
+			for read = 1, #st.memory do
+				local id = st.memory[read]
+				if tonum(id) == corpse_id then
+					removed = true
+				else
+					if write ~= read then
+						st.memory[write] = id
+					end
+					write = write + 1
+				end
+			end
+			if removed then
+				for i = write, #st.memory do
+					st.memory[i] = nil
+				end
+				st.index = 1
+			end
+		end
+		if tonum(st.selected_corpse_id) == corpse_id then
+			st.selected_corpse_id = nil
+			st.vertex_id = nil
+			st.vertex_position = nil
+			st.state = nil
+			st.index = 1
+		end
+		if tonum(st.nearest_id) == corpse_id then
+			st.nearest_id = nil
+			st.nearest_corpse_dist = nil
+			st.nearest_corpse_vertex = nil
+			st.nearest_corpse_position = nil
+		end
+	end
+	zhopa2_mark_corpse_checked(corpse_id)
+	if mod and type(mod.set_valuable_loot) == "function" then
+		pcall(mod.set_valuable_loot, corpse_id, false)
+	end
+end
+
 local function zhopa2_corpse_detect_dist_sqr()
 	local mod = zhopa2_loot_mod()
 	if mod and type(mod.corpse_detect_dist_sqr) == "function" then
@@ -4206,14 +4299,14 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 		local corpse_id = st and tonumber(st.selected_corpse_id) or nil
 		local corpse = corpse_id and ((db.storage[corpse_id] and db.storage[corpse_id].object) or (level and level.object_by_id(corpse_id))) or nil
 		local active = zhopa2_loot_active(npc)
+		if corpse_id and corpse and corpse:alive() ~= true and zhopa2_is_protected_corpse(corpse, corpse_id) then
+			zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
+			return
+		end
 		if not (active and corpse_id and corpse and corpse:alive() ~= true) then
 			if original then
 				return original(npc, ...)
 			end
-			return
-		end
-		if zhopa2_is_protected_corpse(corpse, corpse_id) then
-			zhopa2_mark_corpse_checked(corpse_id)
 			return
 		end
 		st.__stimer = nil
@@ -4296,16 +4389,65 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 end
 
 local function patch_corpse_classes(mod)
+	local function corpse_object(corpse_id)
+		corpse_id = tonumber(corpse_id)
+		if not corpse_id then
+			return nil
+		end
+		return (db and db.storage and db.storage[corpse_id] and db.storage[corpse_id].object) or (level and level.object_by_id(corpse_id))
+	end
+	local function reject_if_protected(st, corpse_id)
+		corpse_id = tonumber(corpse_id)
+		local corpse = corpse_object(corpse_id)
+		if corpse and zhopa2_is_protected_corpse(corpse, corpse_id) then
+			zhopa2_reject_corpse_candidate(mod, st, corpse_id)
+			return true
+		end
+		return false
+	end
+	local function cleanup_protected_state(st)
+		if not st then
+			return false
+		end
+		local rejected = false
+		if reject_if_protected(st, st.selected_corpse_id) then
+			rejected = true
+		end
+		if reject_if_protected(st, st.nearest_id) then
+			rejected = true
+		end
+		if type(st.memory) == "table" then
+			local ids = {}
+			for i = 1, #st.memory do
+				local id = tonumber(st.memory[i])
+				if id then
+					ids[#ids + 1] = id
+				end
+			end
+			for i = 1, #ids do
+				if reject_if_protected(st, ids[i]) then
+					rejected = true
+				end
+			end
+		end
+		return rejected
+	end
 	local eva = module_member(mod, "evaluator_corpse")
 	if eva then
 		M.patch_method(eva, "find_valid_target", PATCH_ID .. "_corpse_find", function(original)
 			return function(self, ...)
 				local npc = self.object
+				if self.a and cleanup_protected_state(self.a) then
+					return false
+				end
 				local active = zhopa2_loot_active(npc)
 				if active and self.a then
 					if self.a.selected_corpse_id then
-						local corpse = (db.storage[self.a.selected_corpse_id] and db.storage[self.a.selected_corpse_id].object) or (level and level.object_by_id(self.a.selected_corpse_id))
-						if corpse and zhopa2_corpse_has_candidate_loot(npc, corpse, self.a.selected_corpse_id, active) and not zhopa2_is_protected_corpse(corpse, self.a.selected_corpse_id) then
+						local corpse_id = tonumber(self.a.selected_corpse_id)
+						local corpse = corpse_object(corpse_id)
+						if corpse and zhopa2_is_protected_corpse(corpse, corpse_id) then
+							zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
+						elseif corpse and zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active) then
 							return true
 						end
 					end
@@ -4319,18 +4461,27 @@ local function patch_corpse_classes(mod)
 					if corpse_ids then
 						for i = 1, #corpse_ids do
 							local corpse_id = tonumber(corpse_ids[i])
-							local obj = corpse_id and ((db.storage[corpse_id] and db.storage[corpse_id].object) or (level and level.object_by_id(corpse_id)))
-							if corpse_id and not seen[corpse_id] and obj and obj:alive() ~= true and zhopa2_corpse_has_candidate_loot(npc, obj, corpse_id, active) and not zhopa2_is_protected_corpse(obj, corpse_id) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
-								self.a.memory[#self.a.memory + 1] = corpse_id
-								seen[corpse_id] = true
-								if mod and type(mod.set_valuable_loot) == "function" then
-									mod.set_valuable_loot(corpse_id, true)
+							local obj = corpse_object(corpse_id)
+							if corpse_id and not seen[corpse_id] and obj and obj:alive() ~= true then
+								if zhopa2_is_protected_corpse(obj, corpse_id) then
+									zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
+									seen[corpse_id] = true
+								elseif zhopa2_corpse_has_candidate_loot(npc, obj, corpse_id, active) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
+									self.a.memory[#self.a.memory + 1] = corpse_id
+									seen[corpse_id] = true
+									if mod and type(mod.set_valuable_loot) == "function" then
+										mod.set_valuable_loot(corpse_id, true)
+									end
 								end
 							end
 						end
 					end
 				end
-				return original(self, ...)
+				local result = original(self, ...)
+				if self.a and cleanup_protected_state(self.a) then
+					return false
+				end
+				return result
 			end
 		end)
 		M.patch_method(eva, "evaluate", PATCH_ID .. "_corpse_eval", function(original)
@@ -4352,6 +4503,17 @@ local function patch_corpse_classes(mod)
 					return true
 				end
 				return false
+			end
+		end)
+	end
+	local action = module_member(mod, "action_search_corpse")
+	if action then
+		M.patch_method(action, "execute", PATCH_ID .. "_corpse_execute", function(original)
+			return function(self, ...)
+				if self.a and cleanup_protected_state(self.a) then
+					return
+				end
+				return original(self, ...)
 			end
 		end)
 	end
