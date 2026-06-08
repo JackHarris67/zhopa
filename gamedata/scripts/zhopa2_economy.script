@@ -229,19 +229,20 @@ local function print_trade_error(fmt, ...)
 end
 
 local function object_id(obj)
+	local type_ = type
 	if not obj then
 		return nil
 	end
-	if type(obj) == "number" then
+	if type_(obj) == "number" then
 		return obj
 	end
-	if type(obj) ~= "table" and type(obj) ~= "userdata" then
+	if type_(obj) ~= "table" and type_(obj) ~= "userdata" then
 		return nil
 	end
-	if obj.id ~= nil and type(obj.id) ~= "function" then
+	if obj.id ~= nil and type_(obj.id) ~= "function" then
 		return obj.id
 	end
-	if type(obj.id) == "function" then
+	if type_(obj.id) == "function" then
 		local ok, id = pcall(obj.id, obj)
 		if ok then
 			return id
@@ -364,11 +365,12 @@ local function read_ini_string_from(ini, section, key)
 end
 
 local function read_job_ini_string(job_or_section, key, smart)
-	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
-	if type(job_or_section) == "table" and type(job_or_section[key]) == "string" then
+	local type_ = type
+	local section = type_(job_or_section) == "table" and job_or_section.section or job_or_section
+	if type_(job_or_section) == "table" and type_(job_or_section[key]) == "string" then
 		return job_or_section[key]
 	end
-	local value = type(job_or_section) == "table" and read_ini_string_from(job_or_section.ltx, section, key) or nil
+	local value = type_(job_or_section) == "table" and read_ini_string_from(job_or_section.ltx, section, key) or nil
 	if value ~= nil then
 		return value
 	end
@@ -553,7 +555,7 @@ local function item_kind(section)
 end
 
 local function section_has_prefix(section, prefix)
-	return type(section) == "string" and string.sub(section, 1, string.len(prefix)) == prefix
+	return type(section) == "string" and string.sub(section, 1, #prefix) == prefix
 end
 
 local function section_contains(section, needle)
@@ -962,6 +964,7 @@ function M.provider_role(npc, smart)
 end
 
 local function npc_service_candidate_blocked(npc, npc_id, params)
+	local sfind = string.find
 	if not npc then
 		return true
 	end
@@ -972,11 +975,11 @@ local function npc_service_candidate_blocked(npc, npc_id, params)
 	local section = object_section(npc)
 	if type(section) == "string" then
 		local s = string.lower(section)
-		if string.find(s, "_trader", 1, true)
-			or string.find(s, "_barman", 1, true)
-			or string.find(s, "_mechanic", 1, true)
-			or string.find(s, "_medic", 1, true)
-			or string.find(s, "_guide", 1, true)
+		if sfind(s, "_trader", 1, true)
+			or sfind(s, "_barman", 1, true)
+			or sfind(s, "_mechanic", 1, true)
+			or sfind(s, "_medic", 1, true)
+			or sfind(s, "_guide", 1, true)
 		then
 			return true
 		end
@@ -1831,6 +1834,7 @@ local function offline_trade_detail_list(entries, field, max_count)
 end
 
 local function set_offline_trade_detail(squad, result, members, plan, wallet, needs)
+	local tostr = tostring
 	if not (squad and debug_print_enabled()) then
 		return
 	end
@@ -1840,12 +1844,12 @@ local function set_offline_trade_detail(squad, result, members, plan, wallet, ne
 	end
 	squad.zhopa2_trade_detail = string.format(
 		"offline result=%s members=%s children=%s sell=%s wallet=%s needs=%s sell_items=%s buy_items=%s",
-		tostring(result or "-"),
-		tostring(members and #members or 0),
-		tostring(child_count),
-		tostring(plan and #plan or 0),
-		tostring(wallet and wallet.total or 0),
-		tostring(needs and #needs or 0),
+		tostr(result or "-"),
+		tostr(members and #members or 0),
+		tostr(child_count),
+		tostr(plan and #plan or 0),
+		tostr(wallet and wallet.total or 0),
+		tostr(needs and #needs or 0),
 		offline_trade_detail_list(plan, "section", 4),
 		offline_trade_detail_list(needs, "section", 4)
 	)
@@ -1949,6 +1953,7 @@ function M.offline_squad_has_trade_work(squad, smart)
 end
 
 function M.execute_offline_squad_trade(squad, smart, reason)
+	local tostr = tostring
 	if M.enabled() ~= true then
 		return false, "disabled"
 	end
@@ -1976,16 +1981,16 @@ function M.execute_offline_squad_trade(squad, smart, reason)
 		M.print_trade_event(
 			"- ZHOPA2 offline trade success | squad [%s:%s] smart [%s:%s] reason [%s] sold [%s/%s] bought [%s/%s] wallet [%s->%s]",
 			object_name(squad),
-			tostring(object_id(squad) or "-"),
+			tostr(object_id(squad) or "-"),
 			object_name(smart),
-			tostring(object_id(smart) or "-"),
-			tostring(reason or "-"),
-			tostring(sold_count),
-			tostring(sold_value),
-			tostring(bought_count),
-			tostring(bought_value),
-			tostring(wallet_before),
-			tostring(wallet_after)
+			tostr(object_id(smart) or "-"),
+			tostr(reason or "-"),
+			tostr(sold_count),
+			tostr(sold_value),
+			tostr(bought_count),
+			tostr(bought_value),
+			tostr(wallet_before),
+			tostr(wallet_after)
 		)
 	end
 	return traded, traded and "offline_traded" or "offline_nothing_to_trade"
@@ -2044,28 +2049,6 @@ function M.convert_online_money_notes(npc)
 		return false, 0
 	end
 	return offline_transfer_money_notes_to_online_npc(npc)
-end
-
-local function npc_has_trade_work(npc)
-	if not (npc and type(npc.alive) == "function" and npc:alive()) then
-		return false, "not_online"
-	end
-	local ok_plan, plan = pcall(M.build_online_sell_plan, npc, nil)
-	if ok_plan and type(plan) == "table" and sell_plan_should_start_auto_trade(npc, plan) then
-		return true, "sell"
-	end
-	local money = npc_money(npc)
-	if money <= 0 then
-		return false, "no_trade_budget"
-	end
-	local needs = build_online_buy_needs(npc)
-	for i = 1, #needs do
-		local price = M.online_trade_buy_section_price(needs[i].section)
-		if price > 0 and money >= price then
-			return true, "buy"
-		end
-	end
-	return false, "nothing_to_trade"
 end
 
 local function clear_npc_trade_state(npc)
@@ -2130,6 +2113,7 @@ local function set_trade_job_idle(npc, params)
 end
 
 local function execute_online_sell_only(npc, trader, params, collect_to)
+	local type_ = type
 	local plan = M.build_online_sell_plan(npc, params)
 	if not plan or #plan == 0 then
 		return false
@@ -2144,12 +2128,12 @@ local function execute_online_sell_only(npc, trader, params, collect_to)
 			local price = M.online_trade_sell_item_price(npc, trader, item)
 			if price > 0 then
 				local transferred = false
-				if trader and type(npc.transfer_item) == "function" then
+				if trader and type_(npc.transfer_item) == "function" then
 					transferred = pcall(npc.transfer_item, npc, item, trader)
-				elseif type(alife_release_id) == "function" then
+				elseif type_(alife_release_id) == "function" then
 					transferred = pcall(alife_release_id, item_id)
 				end
-				if transferred and type(npc.give_money) == "function" then
+				if transferred and type_(npc.give_money) == "function" then
 					local paid = pcall(npc.give_money, npc, price)
 					if paid then
 						sold_any = true
@@ -2157,7 +2141,7 @@ local function execute_online_sell_only(npc, trader, params, collect_to)
 						if game_statistics and game_statistics.increment_npc_statistic then
 							pcall(game_statistics.increment_npc_statistic, npc, "items_sold")
 						end
-					elseif trader and type(trader.transfer_item) == "function" then
+					elseif trader and type_(trader.transfer_item) == "function" then
 						pcall(trader.transfer_item, trader, item, npc)
 					end
 				end
@@ -3181,16 +3165,17 @@ local function prepare_squad_vanilla_trade(squad, members, trader, smart, reason
 end
 
 local function execute_offline_auto_trade(squad, smart, reason, now)
+	local tostr = tostring
 	if object_id(smart) ~= object_id(squad_current_trade_smart(squad)) then
 		mark_squad_trade_result(squad, "trade_no_current_trade_smart", reason, smart)
 		print_trade_error(
 			"~ ZHOPA2 trade error | reason [offline_not_current_smart] squad [%s:%s] smart [%s:%s] current [%s:%s]",
 			object_name(squad),
-			tostring(object_id(squad) or "-"),
+			tostr(object_id(squad) or "-"),
 			object_name(smart),
-			tostring(object_id(smart) or "-"),
+			tostr(object_id(smart) or "-"),
 			object_name(squad_current_trade_smart(squad)),
-			tostring(object_id(squad_current_trade_smart(squad)) or "-")
+			tostr(object_id(squad_current_trade_smart(squad)) or "-")
 		)
 		return false, "not_current_smart"
 	end
@@ -3199,10 +3184,10 @@ local function execute_offline_auto_trade(squad, smart, reason, now)
 		print_trade_error(
 			"~ ZHOPA2 trade error | reason [offline_no_trade_smart] squad [%s:%s] smart [%s:%s] trade_detail [%s]",
 			object_name(squad),
-			tostring(object_id(squad) or "-"),
+			tostr(object_id(squad) or "-"),
 			object_name(smart),
-			tostring(object_id(smart) or "-"),
-			tostring(squad and squad.zhopa2_trade_detail or "-")
+			tostr(object_id(smart) or "-"),
+			tostr(squad and squad.zhopa2_trade_detail or "-")
 		)
 		return false, "no_trade_smart"
 	end
@@ -3220,7 +3205,7 @@ local function execute_offline_auto_trade(squad, smart, reason, now)
 	local ok, traded, result = pcall(M.execute_offline_squad_trade, squad, smart, reason)
 	result = ok and (traded == true and "offline_traded" or (result or "offline_nothing_to_trade")) or "offline_trade_error"
 	if not ok then
-		print_trade_error("~ ZHOPA2 trade error | reason [offline_trade_error] squad [%s:%s] smart [%s:%s] detail [%s]", object_name(squad), tostring(object_id(squad) or "-"), object_name(smart), tostring(object_id(smart) or "-"), tostring(traded))
+		print_trade_error("~ ZHOPA2 trade error | reason [offline_trade_error] squad [%s:%s] smart [%s:%s] detail [%s]", object_name(squad), tostr(object_id(squad) or "-"), object_name(smart), tostr(object_id(smart) or "-"), tostr(traded))
 	end
 	set_squad_trade_cooldown(squad, now)
 	mark_squad_queue_state(squad, "done", object_id(smart), reason)
@@ -3545,6 +3530,7 @@ local function trade_context_already_completed(st)
 end
 
 local function complete_trade_context(npc, params, st, ctx, trader, reason)
+	local tostr = tostring
 	local squad_id = ctx.squad_id
 	local smart_id = ctx.smart_id
 	local ok, sold, result, detail = true, false, "nothing_to_trade", nil
@@ -3560,23 +3546,23 @@ local function complete_trade_context(npc, params, st, ctx, trader, reason)
 		ok, sold, detail = pcall(execute_online_squad_trade, npc, trader, params, squad_id, smart_id, st and st.zhopa2_trade_member_ids or nil)
 		result = ok and (sold == true and "traded" or "nothing_to_trade") or "trade_error"
 		if not ok then
-			detail = tostring(sold)
+			detail = tostr(sold)
 		end
 	end
 	if ctx.zhopa and result ~= "traded" then
 		print_trade_error(
 			"~ ZHOPA2 trade error | reason [%s] npc [%s:%s] squad [%s] smart [%s] trader [%s:%s] st_squad [%s] force_left [%s] member_ids [%s] detail [%s]",
-			tostring(result),
+			tostr(result),
 			object_name(npc),
-			tostring(object_id(npc) or "-"),
-			tostring(squad_id or "-"),
-			tostring(smart_id or "-"),
+			tostr(object_id(npc) or "-"),
+			tostr(squad_id or "-"),
+			tostr(smart_id or "-"),
 			object_name(trader),
-			tostring(object_id(trader) or "-"),
-			tostring(st and st.zhopa2_trade_squad_id or "-"),
-			tostring(st and ((tonumber(st.zhopa2_trade_force_until or 0) or 0) - tg()) or "-"),
-			tostring(trade_member_ids_count(st and st.zhopa2_trade_member_ids or nil)),
-			tostring(detail or "-")
+			tostr(object_id(trader) or "-"),
+			tostr(st and st.zhopa2_trade_squad_id or "-"),
+			tostr(st and ((tonumber(st.zhopa2_trade_force_until or 0) or 0) - tg()) or "-"),
+			tostr(trade_member_ids_count(st and st.zhopa2_trade_member_ids or nil)),
+			tostr(detail or "-")
 		)
 	end
 	if st then
@@ -3613,6 +3599,7 @@ function M.trade_job_give_id(actor, npc, params)
 end
 
 function M.trade_job_sell_items(actor, npc, params)
+	local tostr = tostring
 	if M.enabled() ~= true then
 		if original_trade_job_sell_items then
 			return original_trade_job_sell_items(actor, npc, params)
@@ -3638,14 +3625,14 @@ function M.trade_job_sell_items(actor, npc, params)
 			print_trade_error(
 				"~ ZHOPA2 trade error | reason [signal_without_context] npc [%s:%s] trader [%s:%s] st_squad [%s] force_left [%s] member_ids [%s] params [%s:%s]",
 				object_name(npc),
-				tostring(object_id(npc) or "-"),
+				tostr(object_id(npc) or "-"),
 				object_name(trader),
-				tostring(object_id(trader) or "-"),
-				tostring(st.zhopa2_trade_squad_id or "-"),
-				tostring((tonumber(st.zhopa2_trade_force_until or 0) or 0) - tg()),
-				tostring(trade_member_ids_count(st.zhopa2_trade_member_ids)),
-				tostring(params and params[1] or "-"),
-				tostring(params and params[2] or "-")
+				tostr(object_id(trader) or "-"),
+				tostr(st.zhopa2_trade_squad_id or "-"),
+				tostr((tonumber(st.zhopa2_trade_force_until or 0) or 0) - tg()),
+				tostr(trade_member_ids_count(st.zhopa2_trade_member_ids)),
+				tostr(params and params[1] or "-"),
+				tostr(params and params[2] or "-")
 			)
 		end
 		if original_trade_job_sell_items then
@@ -3658,8 +3645,8 @@ function M.trade_job_sell_items(actor, npc, params)
 		print_trade_error(
 			"~ ZHOPA2 trade error | reason [unhandled_context] npc [%s:%s] result [%s]",
 			object_name(npc),
-			tostring(object_id(npc) or "-"),
-			tostring(result or "-")
+			tostr(object_id(npc) or "-"),
+			tostr(result or "-")
 		)
 	end
 	return

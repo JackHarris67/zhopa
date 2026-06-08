@@ -151,17 +151,18 @@ function M.add_loot_value(squad, value, reason)
 end
 
 function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
+	local tonum = tonumber
 	if not squad then
 		return false
 	end
-	value = math.max(0, tonumber(value) or 0)
-	squad.zhopa2_artifact_cargo_count = (tonumber(squad.zhopa2_artifact_cargo_count) or 0) + 1
-	squad.zhopa2_artifact_cargo_value = (tonumber(squad.zhopa2_artifact_cargo_value) or 0) + value
+	value = math.max(0, tonum(value) or 0)
+	squad.zhopa2_artifact_cargo_count = (tonum(squad.zhopa2_artifact_cargo_count) or 0) + 1
+	squad.zhopa2_artifact_cargo_value = (tonum(squad.zhopa2_artifact_cargo_value) or 0) + value
 	if section then
 		local existing = squad.zhopa2_artifact_cargo_sections
 		squad.zhopa2_artifact_cargo_sections = existing and existing ~= "" and (existing .. "," .. tostring(section)) or tostring(section)
 	end
-	squad.zhopa2_artifact_cargo_last_id = tonumber(artifact_id) or squad.zhopa2_artifact_cargo_last_id
+	squad.zhopa2_artifact_cargo_last_id = tonum(artifact_id) or squad.zhopa2_artifact_cargo_last_id
 	squad.zhopa2_last_result = reason or "artifact_cargo"
 	return true
 end
@@ -254,6 +255,7 @@ function M.write_squad(packet, squad)
 end
 
 function M.read_squad(packet, squad)
+	local tonum = tonumber
 	if not (packet and squad) then
 		return false
 	end
@@ -265,8 +267,8 @@ function M.read_squad(packet, squad)
 		return false
 	end
 
-	local version = tonumber(packet:r_stringZ())
-	local field_count = tonumber(packet:r_stringZ()) or 0
+	local version = tonum(packet:r_stringZ())
+	local field_count = tonum(packet:r_stringZ()) or 0
 	if not version or version < 1 or version > VERSION or field_count < BASE_FIELD_COUNT then
 		M.reset_squad(squad)
 		squad.zhopa2_last_reason = "bad_state_version"
@@ -274,29 +276,29 @@ function M.read_squad(packet, squad)
 	end
 
 	squad.zhopa2_task = read_string(packet)
-	squad.zhopa2_target = tonumber(read_string(packet))
+	squad.zhopa2_target = tonum(read_string(packet))
 	squad.zhopa2_started = utils_data.r_CTime(packet, "zhopa2_memory.zhopa2_started")
-	squad.zhopa2_until = tonumber(read_string(packet))
+	squad.zhopa2_until = tonum(read_string(packet))
 	squad.zhopa2_patrol = read_string(packet)
-	squad.zhopa2_patrol_idx = tonumber(read_string(packet))
+	squad.zhopa2_patrol_idx = tonum(read_string(packet))
 	squad.zhopa2_last_reason = read_string(packet)
 	squad.zhopa2_managed = read_string(packet) == "true"
 	squad.zhopa2_resume_task = field_count >= 9 and read_string(packet) or nil
-	squad.zhopa2_resume_target = field_count >= 10 and tonumber(read_string(packet)) or nil
-	squad.zhopa2_resume_until = field_count >= 11 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_resume_target = field_count >= 10 and tonum(read_string(packet)) or nil
+	squad.zhopa2_resume_until = field_count >= 11 and tonum(read_string(packet)) or nil
 	squad.zhopa2_resume_patrol = field_count >= 12 and read_string(packet) or nil
-	squad.zhopa2_resume_patrol_idx = field_count >= 13 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_resume_patrol_idx = field_count >= 13 and tonum(read_string(packet)) or nil
 	squad.zhopa2_resume_reason = field_count >= 14 and read_string(packet) or nil
 	squad.zhopa2_recent_smarts = field_count >= 15 and read_string(packet) or nil
 	squad.zhopa2_last_result = field_count >= 16 and read_string(packet) or nil
 	squad.zhopa2_recent_targets = field_count >= 17 and read_string(packet) or nil
-	squad.zhopa2_loot_count = field_count >= 18 and (tonumber(read_string(packet)) or 0) or 0
-	squad.zhopa2_loot_value = field_count >= 19 and (tonumber(read_string(packet)) or 0) or 0
-	squad.zhopa2_artifact_cargo_count = field_count >= 20 and (tonumber(read_string(packet)) or 0) or 0
-	squad.zhopa2_artifact_cargo_value = field_count >= 21 and (tonumber(read_string(packet)) or 0) or 0
+	squad.zhopa2_loot_count = field_count >= 18 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_loot_value = field_count >= 19 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_artifact_cargo_count = field_count >= 20 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_artifact_cargo_value = field_count >= 21 and (tonum(read_string(packet)) or 0) or 0
 	squad.zhopa2_artifact_cargo_sections = field_count >= 22 and read_string(packet) or nil
-	squad.zhopa2_artifact_cargo_last_id = field_count >= 23 and tonumber(read_string(packet)) or nil
-	squad.zhopa2_artifact_id = field_count >= 24 and tonumber(read_string(packet)) or nil
+	squad.zhopa2_artifact_cargo_last_id = field_count >= 23 and tonum(read_string(packet)) or nil
+	squad.zhopa2_artifact_id = field_count >= 24 and tonum(read_string(packet)) or nil
 	squad.zhopa2_artifact_section = field_count >= 25 and read_string(packet) or nil
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version

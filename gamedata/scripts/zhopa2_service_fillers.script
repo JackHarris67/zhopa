@@ -4,7 +4,6 @@ local PENDING_FILL_TTL_MS = 10000
 local SERVICE_TOKEN = "_sim_squad_service_"
 local ROLE_NONE = false
 
-local tinsert = table.insert
 local tconcat = table.concat
 local sfind = string.find
 local smatch = string.match
@@ -364,8 +363,9 @@ local function normalize_role(role)
 end
 
 local function classify_job_role(job_or_section, smart)
-	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
-	if type(section) ~= "string" or section == "" then
+	local type_ = type
+	local section = type_(job_or_section) == "table" and job_or_section.section or job_or_section
+	if type_(section) ~= "string" or section == "" then
 		return nil
 	end
 	local cached = JOB_ROLE_CACHE[section]
@@ -384,7 +384,7 @@ local function classify_job_role(job_or_section, smart)
 	end
 
 	local suitable = read_ini_string(job_or_section, "suitable", smart)
-	local suitable_l = type(suitable) == "string" and slower(suitable) or nil
+	local suitable_l = type_(suitable) == "string" and slower(suitable) or nil
 	if contains(suitable_l, "npc_has_items_to_sell") or contains(suitable_l, "npc_has_tech_items") then
 		JOB_ROLE_CACHE[section] = ROLE_NONE
 		return nil
@@ -407,7 +407,7 @@ local function classify_job_role(job_or_section, smart)
 
 	if not role then
 		local trade_ltx = read_ini_string(job_or_section, "trade", smart)
-		if type(trade_ltx) == "string" and trade_ltx ~= "" then
+		if type_(trade_ltx) == "string" and trade_ltx ~= "" then
 			if contains(sec_l, "mechanic") or contains(sec_l, "tech") then
 				role = "tech"
 			elseif contains(sec_l, "medic") then
@@ -770,15 +770,15 @@ local function service_section(engine_owner, role)
 	local candidates = {}
 	local alias = service_alias(engine_owner)
 	if alias then
-		tinsert(candidates, alias .. SERVICE_TOKEN .. role)
+		candidates[#candidates+1] = alias .. SERVICE_TOKEN .. role
 	end
 	local prefix = vanilla_prefix(engine_owner)
 	local suffix = ROLE_SUFFIX[role]
 	if prefix and suffix then
-		tinsert(candidates, prefix .. "_sim_squad_" .. suffix)
+		candidates[#candidates+1] = prefix .. "_sim_squad_" .. suffix
 	end
 	if alias and suffix and alias ~= prefix then
-		tinsert(candidates, alias .. "_sim_squad_" .. suffix)
+		candidates[#candidates+1] = alias .. "_sim_squad_" .. suffix
 	end
 	for i = 1, #candidates do
 		if section_exists(candidates[i]) then

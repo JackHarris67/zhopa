@@ -575,18 +575,19 @@ local function exclusive_item_owner(item_id)
 end
 
 local function item_reserved_for_other(obj, looter)
-	local item_id = tonumber(object_id(obj))
+	local tonum = tonumber
+	local item_id = tonum(object_id(obj))
 	if not valid_id(item_id) then
 		return false
 	end
 	local owner_id = exclusive_item_owner(item_id)
 	local targeted = targeted_item_requests_by_item[item_id]
-	owner_id = owner_id or (targeted and tonumber(targeted.npc_id) or nil)
+	owner_id = owner_id or (targeted and tonum(targeted.npc_id) or nil)
 	if not owner_id then
 		return false
 	end
 	local looter_id = object_id(looter)
-	return tonumber(looter_id) ~= tonumber(owner_id)
+	return tonum(looter_id) ~= tonum(owner_id)
 end
 
 function M.can_take_section(section, obj, looter)
@@ -729,15 +730,16 @@ local function create_section_to_looter(section, se_looter, props)
 end
 
 local function clone_ammo_to_looter(section, se_item, se_looter)
+	local type_ = type
 	local ammo_left
-	if utils_stpk and type(utils_stpk.get_ammo_data) == "function" then
+	if utils_stpk and type_(utils_stpk.get_ammo_data) == "function" then
 		local ok_data, data = pcall(utils_stpk.get_ammo_data, se_item)
 		ammo_left = ok_data and data and tonumber(data.ammo_left) or nil
 	end
-	if not ammo_left and ini_sys and type(ini_sys.r_u32_ex) == "function" then
+	if not ammo_left and ini_sys and type_(ini_sys.r_u32_ex) == "function" then
 		ammo_left = ini_sys:r_u32_ex(section, "box_size")
 	end
-	if not ammo_left and ini_sys and type(ini_sys.r_u32) == "function" and type(ini_sys.line_exist) == "function" and ini_sys:line_exist(section, "box_size") then
+	if not ammo_left and ini_sys and type_(ini_sys.r_u32) == "function" and type_(ini_sys.line_exist) == "function" and ini_sys:line_exist(section, "box_size") then
 		ammo_left = ini_sys:r_u32(section, "box_size")
 	end
 	ammo_left = ammo_left or 1
@@ -792,35 +794,37 @@ local function created_item_valid(se_new, se_looter)
 end
 
 local function created_item_transfer_log_entry(section, se_new, value, tag)
-	local label = tostring(section or object_section(se_new) or "-")
+	local tostr = tostring
+	local label = tostr(section or object_section(se_new) or "-")
 	local new_id = object_id(se_new)
 	if new_id then
-		label = label .. "->" .. tostring(new_id)
+		label = label .. "->" .. tostr(new_id)
 	end
 	value = tonumber(value)
 	if value and value > 0 then
-		label = label .. "=" .. tostring(math.floor(value + 0.5))
+		label = label .. "=" .. tostr(math.floor(value + 0.5))
 	end
 	if tag then
-		label = label .. "#" .. tostring(tag)
+		label = label .. "#" .. tostr(tag)
 	end
 	return label
 end
 
 local function offline_loot_item_log_entry(section, se_item, value)
+	local tostr = tostring
 	section = section or object_section(se_item) or "-"
 	local name = object_name(se_item)
-	local label = tostring(section)
+	local label = tostr(section)
 	if name and name ~= "-" and name ~= section then
-		label = label .. "/" .. tostring(name)
+		label = label .. "/" .. tostr(name)
 	end
 	local id = object_id(se_item)
 	if id then
-		label = label .. ":" .. tostring(id)
+		label = label .. ":" .. tostr(id)
 	end
 	value = tonumber(value)
 	if value and value > 0 then
-		label = label .. "=" .. tostring(math.floor(value + 0.5))
+		label = label .. "=" .. tostr(math.floor(value + 0.5))
 	end
 	return label
 end
@@ -888,16 +892,18 @@ local function split_artifact_sections(sections)
 end
 
 local function consume_artifact_cargo_from_squad(squad, count, value, reason)
-	if not (squad and (tonumber(squad.zhopa2_artifact_cargo_count) or 0) > 0) then
+	local mmax = math.max
+	local tonum = tonumber
+	if not (squad and (tonum(squad.zhopa2_artifact_cargo_count) or 0) > 0) then
 		return false
 	end
 	local idx = index_mod()
 	if idx and type(idx.consume_artifact_cargo) == "function" then
 		return idx.consume_artifact_cargo(squad, count, value, reason or "artifact_cargo_looted")
 	end
-	count = math.max(1, tonumber(count) or 1)
-	value = math.max(0, tonumber(value) or 0)
-	local next_count = math.max(0, (tonumber(squad.zhopa2_artifact_cargo_count) or 0) - count)
+	count = mmax(1, tonum(count) or 1)
+	value = mmax(0, tonum(value) or 0)
+	local next_count = mmax(0, (tonum(squad.zhopa2_artifact_cargo_count) or 0) - count)
 	if next_count <= 0 then
 		squad.zhopa2_artifact_cargo_count = 0
 		squad.zhopa2_artifact_cargo_value = 0
@@ -905,7 +911,7 @@ local function consume_artifact_cargo_from_squad(squad, count, value, reason)
 		squad.zhopa2_artifact_cargo_last_id = nil
 	else
 		squad.zhopa2_artifact_cargo_count = next_count
-		squad.zhopa2_artifact_cargo_value = math.max(0, (tonumber(squad.zhopa2_artifact_cargo_value) or 0) - value)
+		squad.zhopa2_artifact_cargo_value = mmax(0, (tonum(squad.zhopa2_artifact_cargo_value) or 0) - value)
 	end
 	squad.zhopa2_last_result = reason or "artifact_cargo_looted"
 	return true
@@ -1144,6 +1150,7 @@ local function offline_loot_items_log(items)
 end
 
 function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
+	local tostr = tostring
 	if not runtime_ready("loot_offline") then
 		return false, "runtime_not_ready"
 	end
@@ -1221,17 +1228,17 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 	attacker_squad.zhopa2_last_result = (reason or "offline_real_loot") .. ":" .. moved_count
 	if printf and debug_print_enabled() then
 		printf("~ ZHOPA2 offline loot | squad [%s:%s] looter [%s:%s] victim [%s:%s] level [%s] items [%s] value [%s] loot [%s] reason [%s]",
-			tostring(object_name(attacker_squad)),
-			tostring(object_id(attacker_squad) or "-"),
-			tostring(object_name(se_looter)),
-			tostring(object_id(se_looter) or "-"),
-			tostring(object_name(se_victim)),
-			tostring(object_id(se_victim) or "-"),
+			tostr(object_name(attacker_squad)),
+			tostr(object_id(attacker_squad) or "-"),
+			tostr(object_name(se_looter)),
+			tostr(object_id(se_looter) or "-"),
+			tostr(object_name(se_victim)),
+			tostr(object_id(se_victim) or "-"),
 			offline_loot_level_log(se_victim, se_looter, attacker_squad),
-			tostring(moved_count),
-			tostring(math.floor(moved_value + 0.5)),
+			tostr(moved_count),
+			tostr(math.floor(moved_value + 0.5)),
 			offline_loot_items_log(moved_items),
-			tostring(reason or "offline_real_loot")
+			tostr(reason or "offline_real_loot")
 		)
 	end
 	return true
@@ -1482,7 +1489,8 @@ function M.reserve_item_for_npc(npc, item_id, reason)
 end
 
 function M.release_item_reservation(item_id, npc_or_id)
-	item_id = tonumber(item_id)
+	local tonum = tonumber
+	item_id = tonum(item_id)
 	if not valid_id(item_id) then
 		return false
 	end
@@ -1490,8 +1498,8 @@ function M.release_item_reservation(item_id, npc_or_id)
 	if not request then
 		return false
 	end
-	local npc_id = object_id(npc_or_id) or tonumber(npc_or_id)
-	if valid_id(npc_id) and tonumber(request.npc_id) ~= tonumber(npc_id) then
+	local npc_id = object_id(npc_or_id) or tonum(npc_or_id)
+	if valid_id(npc_id) and tonum(request.npc_id) ~= tonum(npc_id) then
 		return false
 	end
 	exclusive_item_reservations[item_id] = nil
@@ -1712,21 +1720,22 @@ local function artifact_pickup_recovery_context(squad)
 end
 
 function M.note_vanilla_artifact_pickup(npc, artifact_id, section)
+	local tonum = tonumber
 	cleanup_vanilla_artifact_pickups()
 	local npc_id = object_id(npc)
-	artifact_id = tonumber(artifact_id)
+	artifact_id = tonum(artifact_id)
 	if not (valid_id(npc_id) and valid_id(artifact_id)) then
 		return false
 	end
 	local idx = index_mod()
-	local squad_id = idx and idx.artifact_reserved_by and tonumber(idx.artifact_reserved_by[artifact_id]) or nil
+	local squad_id = idx and idx.artifact_reserved_by and tonum(idx.artifact_reserved_by[artifact_id]) or nil
 	local squad = squad_by_id(squad_id) or looter_squad(npc)
 	if not (squad and squad.zhopa2_task == "ARTEFACT") then
 		return false
 	end
-	local reserved = tonumber(squad.zhopa2_artifact_id)
+	local reserved = tonum(squad.zhopa2_artifact_id)
 	if not reserved and idx and idx.squad_artifact_reservation and squad.id then
-		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+		reserved = tonum(idx.squad_artifact_reservation[squad.id])
 	end
 	if reserved ~= artifact_id then
 		return false
@@ -1795,22 +1804,23 @@ local function record_task_artifact_pickup_by_section(npc, item, request, reason
 end
 
 local function record_task_artifact_pickup(npc, item, reason)
+	local tonum = tonumber
 	if not (npc and item) then
 		return false
 	end
 	local item_id = object_id(item)
 	local idx = index_mod()
-	local squad_id = idx and idx.artifact_reserved_by and item_id and tonumber(idx.artifact_reserved_by[item_id]) or nil
+	local squad_id = idx and idx.artifact_reserved_by and item_id and tonum(idx.artifact_reserved_by[item_id]) or nil
 	local squad = squad_by_id(squad_id) or looter_squad(npc)
-	local reserved = squad and tonumber(squad.zhopa2_artifact_id) or nil
+	local reserved = squad and tonum(squad.zhopa2_artifact_id) or nil
 	if not reserved and squad and idx and idx.squad_artifact_reservation and squad.id then
-		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+		reserved = tonum(idx.squad_artifact_reservation[squad.id])
 	end
 	if not (
 		squad
 		and squad.zhopa2_task == "ARTEFACT"
 		and item_id
-		and reserved == tonumber(item_id)
+		and reserved == tonum(item_id)
 	) then
 		return false
 	end
@@ -1851,18 +1861,19 @@ local function recover_task_artifact_from_squad_inventory(squad, artifact_id, re
 end
 
 function M.recover_pending_vanilla_artifact_pickup(squad, artifact_id)
+	local tonum = tonumber
 	cleanup_vanilla_artifact_pickups()
-	artifact_id = tonumber(artifact_id)
+	artifact_id = tonum(artifact_id)
 	if not (squad and squad.id and artifact_id) then
 		return false
 	end
 	for npc_id, request in pairs(vanilla_artifact_pickups) do
 		if request
-			and tonumber(request.artifact_id) == artifact_id
-			and tonumber(request.squad_id) == tonumber(squad.id)
+			and tonum(request.artifact_id) == artifact_id
+			and tonum(request.squad_id) == tonum(squad.id)
 		then
 			local npc = online_object_by_id(npc_id)
-			if npc and inventory_section_count(npc, request.section) > (tonumber(request.before_count) or 0) then
+			if npc and inventory_section_count(npc, request.section) > (tonum(request.before_count) or 0) then
 				local item = inventory_item_by_section(npc, request.section)
 				if record_task_artifact_pickup_by_section(npc, item, request, "artifact_vanilla_inventory_recover") then
 					return true

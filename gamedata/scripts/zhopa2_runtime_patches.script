@@ -68,9 +68,10 @@ local function class_candidate(candidate, required_method)
 end
 
 local function script_class(script_name, class_name, required_method)
+	local rawget_ = rawget
 	local mod = safe_require(script_name)
 	if type(mod) == "table" then
-		local cls = class_candidate(rawget(mod, class_name), required_method)
+		local cls = class_candidate(rawget_(mod, class_name), required_method)
 		if cls then
 			return cls
 		end
@@ -79,18 +80,18 @@ local function script_class(script_name, class_name, required_method)
 			return cls
 		end
 	end
-	local cls = class_candidate(rawget(_G, class_name), required_method)
+	local cls = class_candidate(rawget_(_G, class_name), required_method)
 	if cls then
 		return cls
 	end
 	if script_name == "sim_board" and class_name == "simulation_board" then
-		local board = rawget(_G, "SIMBOARD")
+		local board = rawget_(_G, "SIMBOARD")
 		if class_candidate(board, required_method or "register_smart") then
 			return board
 		end
 		local mt = board and getmetatable and getmetatable(board) or nil
 		if type(mt) == "table" then
-			local index = rawget(mt, "__index")
+			local index = rawget_(mt, "__index")
 			if class_candidate(index, required_method or "register_smart") then
 				return index
 			end
@@ -103,16 +104,17 @@ local function script_class(script_name, class_name, required_method)
 end
 
 local function object_id(obj)
+	local type_ = type
 	if not obj then
 		return nil
 	end
-	if type(obj) == "number" or type(obj) == "string" then
+	if type_(obj) == "number" or type_(obj) == "string" then
 		return tonumber(obj) or obj
 	end
-	if obj.id ~= nil and type(obj.id) ~= "function" then
+	if obj.id ~= nil and type_(obj.id) ~= "function" then
 		return tonumber(obj.id) or obj.id
 	end
-	if type(obj.id) == "function" then
+	if type_(obj.id) == "function" then
 		local ok, id = pcall(obj.id, obj)
 		return ok and (tonumber(id) or id) or nil
 	end
@@ -156,6 +158,7 @@ function M.zhopa2_online_object_by_id(id)
 end
 
 function M.zhopa2_object_location(obj)
+	local tonum = tonumber
 	if not obj then
 		return nil, nil, nil
 	end
@@ -165,54 +168,48 @@ function M.zhopa2_object_location(obj)
 		local gv_id = nil
 		if type(obj.level_vertex_id) == "function" then
 			local ok_lv, value = pcall(obj.level_vertex_id, obj)
-			lv_id = ok_lv and tonumber(value) or nil
+			lv_id = ok_lv and tonum(value) or nil
 		end
 		if type(obj.game_vertex_id) == "function" then
 			local ok_gv, value = pcall(obj.game_vertex_id, obj)
-			gv_id = ok_gv and tonumber(value) or nil
+			gv_id = ok_gv and tonum(value) or nil
 		end
 		return ok_pos and pos or nil, lv_id, gv_id
 	end
-	return obj.position, tonumber(obj.m_level_vertex_id), tonumber(obj.m_game_vertex_id)
+	return obj.position, tonum(obj.m_level_vertex_id), tonum(obj.m_game_vertex_id)
 end
 
 function M.zhopa2_direct_hunt_target_anchor(target)
-	if not (target and target.clsid and target:clsid() == clsid.online_offline_group_s and type(target.commander_id) == "function") then
+	local type_ = type
+	if not (target and target.clsid and target:clsid() == clsid.online_offline_group_s and type_(target.commander_id) == "function") then
 		return target
 	end
 	local ok_id, commander_id = pcall(target.commander_id, target)
 	commander_id = ok_id and tonumber(commander_id) or nil
 	local commander = commander_id and M.zhopa2_online_object_by_id(commander_id) or nil
-	if commander and type(commander.position) == "function" and type(commander.level_vertex_id) == "function" and type(commander.game_vertex_id) == "function" then
+	if commander and type_(commander.position) == "function" and type_(commander.level_vertex_id) == "function" and type_(commander.game_vertex_id) == "function" then
 		return commander
 	end
 	return target
 end
 
 local function direct_hunt_target_signature(target)
+	local tostr = tostring
 	if not target then
 		return nil
 	end
 	local anchor = M.zhopa2_direct_hunt_target_anchor(target)
 	local pos, lv_id, gv_id = M.zhopa2_object_location(anchor)
-	local signature = tostring(object_id(target) or "-") .. ":" .. tostring(object_id(anchor) or "-") .. ":" .. tostring(gv_id or target.m_game_vertex_id or "-") .. ":" .. tostring(lv_id or target.m_level_vertex_id or "-")
+	local signature = tostr(object_id(target) or "-") .. ":" .. tostr(object_id(anchor) or "-") .. ":" .. tostr(gv_id or target.m_game_vertex_id or "-") .. ":" .. tostr(lv_id or target.m_level_vertex_id or "-")
 	if pos then
 		local ok, x, y, z = pcall(function()
 			return tonumber(pos.x), tonumber(pos.y), tonumber(pos.z)
 		end)
 		if ok and x and y and z then
-			signature = signature .. ":" .. tostring(math.floor(x / 3)) .. ":" .. tostring(math.floor(y / 3)) .. ":" .. tostring(math.floor(z / 3))
+			signature = signature .. ":" .. tostr(math.floor(x / 3)) .. ":" .. tostr(math.floor(y / 3)) .. ":" .. tostr(math.floor(z / 3))
 		end
 	end
 	return signature
-end
-
-local function call_all(...)
-	local ok, a, b, c, d, e = pcall(...)
-	if ok then
-		return a, b, c, d, e
-	end
-	return nil
 end
 
 local function cfg_bool(key, default)
@@ -256,10 +253,6 @@ local function global_level_blacklisted(level_name)
 		and cfg.is_global_level_blacklisted(level_name) == true
 end
 
-local function debug_enabled()
-	return cfg_bool("debug_hud_enabled", false) == true
-end
-
 local function zhopa2_debug_printf(fmt, ...)
 	if cfg_bool("debug_hud_enabled", false) == true and type(printf) == "function" then
 		printf(fmt, ...)
@@ -285,20 +278,21 @@ local function runtime_item_key(stage, item)
 end
 
 local function mark_runtime_item(stage, item, ok, reason, detail)
+	local tostr = tostring
 	local key = runtime_item_key(stage, item)
 	if ok then
 		if runtime_ready_items[key] ~= true then
 			runtime_ready_items[key] = true
 			runtime_ready_errors[key] = nil
 			runtime_ready_count = runtime_ready_count + 1
-			runtime_log("~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]", tostring(runtime_ready_count), tostring(runtime_ready_total), tostring(stage), tostring(item))
+			runtime_log("~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]", tostr(runtime_ready_count), tostr(runtime_ready_total), tostr(stage), tostr(item))
 		end
 		return true
 	end
-	local err = tostring(reason or "not_ready") .. "|" .. tostring(detail or "-")
+	local err = tostr(reason or "not_ready") .. "|" .. tostr(detail or "-")
 	if runtime_ready_errors[key] ~= err then
 		runtime_ready_errors[key] = err
-		runtime_log("~ ZHOPA2 runtime error | stage [%s] item [%s] reason [%s] detail [%s]", tostring(stage), tostring(item), tostring(reason or "not_ready"), tostring(detail or "-"))
+		runtime_log("~ ZHOPA2 runtime error | stage [%s] item [%s] reason [%s] detail [%s]", tostr(stage), tostr(item), tostr(reason or "not_ready"), tostr(detail or "-"))
 	end
 	return false
 end
@@ -356,9 +350,10 @@ local function runtime_missing_item()
 end
 
 local function required_script_class(script_name, class_name, surface, required_method)
+	local tostr = tostring
 	local cls = script_class(script_name, class_name, required_method)
 	if not cls and current_patch_reason ~= "on_game_start" then
-		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [%s] reason [missing_class] script [%s] class [%s] method [%s]", tostring(surface or class_name), tostring(script_name), tostring(class_name), tostring(required_method or "-"))
+		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [%s] reason [missing_class] script [%s] class [%s] method [%s]", tostr(surface or class_name), tostr(script_name), tostr(class_name), tostr(required_method or "-"))
 	end
 	return cls
 end
@@ -491,19 +486,6 @@ local function patch_required_method(owner, method, patch_id, wrapper_factory, s
 		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [%s] method [%s] reason [%s]", tostring(surface or patch_id), tostring(method), tostring(reason))
 	end
 	return ok, reason
-end
-
-local function patch_global(table_name, method, patch_id, wrapper_factory)
-	local owner = safe_require(table_name)
-	if not owner then
-		return false, "missing_owner"
-	end
-	return M.patch_method(owner, method, patch_id, wrapper_factory)
-end
-
-local function module_func(name, func)
-	local mod = safe_require(name)
-	return mod and mod[func] or nil
 end
 
 -- sim_squad_scripted ---------------------------------------------------------
@@ -712,17 +694,18 @@ function squad_methods.zhopa2_is_managed_scripted_target(self)
 end
 
 function squad_methods.zhopa2_reset_state(self)
-	if type(self.zhopa2_release_revenge_hostility) == "function" then
+	local type_ = type
+	if type_(self.zhopa2_release_revenge_hostility) == "function" then
 		self:zhopa2_release_revenge_hostility()
 	end
-	if type(self.zhopa2_release_task_rush) == "function" then
+	if type_(self.zhopa2_release_task_rush) == "function" then
 		self:zhopa2_release_task_rush()
 	end
-	if type(self.zhopa2_unregister_base_camping_registry) == "function" then
+	if type_(self.zhopa2_unregister_base_camping_registry) == "function" then
 		self:zhopa2_unregister_base_camping_registry()
 	end
 	local mem = memory()
-	if mem and type(mem.reset_squad) == "function" then
+	if mem and type_(mem.reset_squad) == "function" then
 		return mem.reset_squad(self)
 	end
 	self.zhopa2_task = nil
@@ -996,7 +979,9 @@ function squad_methods.zhopa2_target_is_alive(self)
 		local actor = db and db.actor or nil
 		if not actor and alife then
 			local sim = alife()
-			actor = sim and sim:actor() or nil
+			if sim then
+				actor = sim:actor()
+			end
 		end
 		if not actor then
 			return true
@@ -1099,6 +1084,7 @@ function squad_methods.zhopa2_state_write(self, packet)
 end
 
 function squad_methods.zhopa2_state_read(self, packet)
+	local tonum = tonumber
 	local mem = memory()
 	if mem and type(mem.read_squad) == "function" then
 		local result = mem.read_squad(packet, self)
@@ -1108,17 +1094,17 @@ function squad_methods.zhopa2_state_read(self, packet)
 		self:zhopa2_sync_base_camping_registry()
 		return result
 	end
-	local version = tonumber(read_string(packet))
+	local version = tonum(read_string(packet))
 	if version ~= ZHOPA2.STATE_VERSION then
 		self:zhopa2_reset_state()
 		return
 	end
 	self.zhopa2_task = read_string(packet)
-	self.zhopa2_target = tonumber(read_string(packet))
+	self.zhopa2_target = tonum(read_string(packet))
 	self.zhopa2_started = utils_data.r_CTime(packet, "sim_squad_scripted.zhopa2_started")
-	self.zhopa2_until = tonumber(read_string(packet))
+	self.zhopa2_until = tonum(read_string(packet))
 	self.zhopa2_patrol = read_string(packet)
-	self.zhopa2_patrol_idx = tonumber(read_string(packet))
+	self.zhopa2_patrol_idx = tonum(read_string(packet))
 	self.zhopa2_last_reason = read_string(packet)
 	self.zhopa2_managed = read_string(packet) == "true"
 	if self.zhopa2_task and self.zhopa2_target then
@@ -1502,11 +1488,12 @@ local function beh_ini()
 end
 
 local function read_job_string(job_or_section, key, smart)
-	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
-	if type(job_or_section) == "table" and type(job_or_section[key]) == "string" then
+	local type_ = type
+	local section = type_(job_or_section) == "table" and job_or_section.section or job_or_section
+	if type_(job_or_section) == "table" and type_(job_or_section[key]) == "string" then
 		return job_or_section[key]
 	end
-	local value = type(job_or_section) == "table" and ini_string(job_or_section.ltx, section, key) or nil
+	local value = type_(job_or_section) == "table" and ini_string(job_or_section.ltx, section, key) or nil
 	if value ~= nil then
 		return value
 	end
@@ -1855,7 +1842,6 @@ function M.patch_sim_board()
 	end)
 	M.patch_method(cls, "register_smart", PATCH_ID .. "_board_register_smart", function(original)
 		return function(self, obj, ...)
-			local exists = obj and self.smarts and self.smarts[obj.id] ~= nil
 			local result = { original(self, obj, ...) }
 			if obj and type(self.zhopa2_register_smart) == "function" then
 				self:zhopa2_register_smart(obj)
@@ -1980,11 +1966,12 @@ local function clear_forced_trade_job(st)
 end
 
 local function reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section)
+	local tonum = tonumber
 	if not (smart and npc_info and st and npc_id and force_section) then
 		return false
 	end
-	local owner = smart.npc_by_job_section and tonumber(smart.npc_by_job_section[force_section]) or nil
-	if owner and owner ~= tonumber(npc_id) then
+	local owner = smart.npc_by_job_section and tonum(smart.npc_by_job_section[force_section]) or nil
+	if owner and owner ~= tonum(npc_id) then
 		return false
 	end
 	local job = smart.find_job_by_section and smart:find_job_by_section(force_section) or nil
@@ -1993,7 +1980,7 @@ local function reassign_forced_trade_job(smart, npc_info, st, npc_id, force_sect
 	end
 	if smart.npc_by_job_section then
 		for sec, npcid in pairs(smart.npc_by_job_section) do
-			if tonumber(npcid) == tonumber(npc_id) and sec ~= force_section then
+			if tonum(npcid) == tonum(npc_id) and sec ~= force_section then
 				smart.npc_by_job_section[sec] = nil
 			end
 		end
@@ -2078,12 +2065,13 @@ local function try_service_fallback_job(smart, npc_info)
 end
 
 local function refresh_job_capacity(smart)
+	local type_ = type
 	if not smart then
 		return
 	end
 	smart.zhopa2_job_capacity_stalker = 0
 	smart.zhopa2_stalker_job_nonexclusive_sections = {}
-	if type(smart.stalker_jobs) == "table" then
+	if type_(smart.stalker_jobs) == "table" then
 		for i = 1, #smart.stalker_jobs do
 			local job = smart.stalker_jobs[i]
 			if not job.exclusive then
@@ -2095,16 +2083,16 @@ local function refresh_job_capacity(smart)
 		end
 	end
 	smart.zhopa2_job_capacity_monster = 0
-	if type(smart.monster_jobs) == "table" then
+	if type_(smart.monster_jobs) == "table" then
 		for i = 1, #smart.monster_jobs do
 			if not smart.monster_jobs[i].exclusive then
 				smart.zhopa2_job_capacity_monster = smart.zhopa2_job_capacity_monster + 1
 			end
 		end
 	end
-	if SIMBOARD and type(SIMBOARD.zhopa2_register_smart) == "function" then
+	if SIMBOARD and type_(SIMBOARD.zhopa2_register_smart) == "function" then
 		SIMBOARD:zhopa2_register_smart(smart)
-	elseif SIMBOARD and type(SIMBOARD.zhopa2_register_trade_smart) == "function" then
+	elseif SIMBOARD and type_(SIMBOARD.zhopa2_register_trade_smart) == "function" then
 		SIMBOARD:zhopa2_register_trade_smart(smart)
 	end
 end
@@ -2317,7 +2305,12 @@ function M.patch_bind_anomaly_zone()
 			local filename = nil
 			if obj and type(obj.spawn_ini) == "function" then
 				local spawn_ini = obj:spawn_ini()
-				filename = spawn_ini and spawn_ini:r_string_ex("anomal_zone", "cfg")
+				if spawn_ini then
+					local ok_cfg, cfg_name = pcall(function()
+						return spawn_ini:r_string_ex("anomal_zone", "cfg")
+					end)
+					filename = ok_cfg and cfg_name or nil
+				end
 			end
 			register_anomaly_zone(self, filename, "bind_anomaly_zone")
 			return unpack(result)
@@ -2530,7 +2523,7 @@ local function direct_monster_update(self)
 		local pos = commander:position()
 		if run then
 			action(self.object, move(move.run_with_leader, pos), cond(cond.move_end))
-		elseif pos:distance_to(self.object:position()) > 10 then
+		elseif pos:distance_to_sqr(self.object:position()) > 100 then
 			action(self.object, move(move.run_with_leader, pos), cond(cond.move_end))
 		else
 			action(self.object, move(move.walk_with_leader, pos), cond(cond.move_end))
@@ -2763,9 +2756,10 @@ local function zhopa2_targeted_item_ids(npc)
 end
 
 local function zhopa2_item_targeted_for_npc(npc, item_id, ids)
-	item_id = tonumber(item_id)
+	local tonum = tonumber
+	item_id = tonum(item_id)
 	local st = npc and db and db.storage and db.storage[npc:id()] and db.storage[npc:id()].gather_items or nil
-	if st and tonumber(st.zhopa2_targeted_item_id) and (not item_id or tonumber(st.zhopa2_targeted_item_id) == item_id) then
+	if st and tonum(st.zhopa2_targeted_item_id) and (not item_id or tonum(st.zhopa2_targeted_item_id) == item_id) then
 		return true
 	end
 	ids = ids or zhopa2_targeted_item_ids(npc)
@@ -2776,7 +2770,7 @@ local function zhopa2_item_targeted_for_npc(npc, item_id, ids)
 		return #ids > 0
 	end
 	for i = 1, #ids do
-		if tonumber(ids[i]) == item_id then
+		if tonum(ids[i]) == item_id then
 			return true
 		end
 	end
@@ -2841,11 +2835,14 @@ end
 local function zhopa2_reservation_is_live(owner_id, item_id)
 	owner_id = tonumber(owner_id)
 	item_id = tonumber(item_id)
-	if not (owner_id and item_id and db and db.storage and level) then
+	if not (owner_id and item_id and db and db.storage and level and type(level.object_by_id) == "function") then
 		return false
 	end
 	local owner = level.object_by_id(owner_id)
-	if not (owner and type(owner.alive) == "function" and owner:alive() == true) then
+	if not owner then
+		return false
+	end
+	if not (type(owner.alive) == "function" and owner:alive() == true) then
 		return false
 	end
 	local owner_st = db.storage[owner_id] and db.storage[owner_id].gather_items
@@ -3074,10 +3071,11 @@ local function zhopa2_artifact_approach_progress_ok(npc, st)
 end
 
 function M.zhopa2_gather_stalled(npc, st, item_id, target_pos)
+	local tonum = tonumber
 	if not (npc and st and target_pos and time_global) then
 		return false
 	end
-	item_id = tonumber(item_id)
+	item_id = tonum(item_id)
 	if not item_id then
 		return false
 	end
@@ -3086,7 +3084,7 @@ function M.zhopa2_gather_stalled(npc, st, item_id, target_pos)
 		return false
 	end
 	local now = time_global()
-	if tonumber(st.zhopa2_gather_stall_item_id) ~= item_id then
+	if tonum(st.zhopa2_gather_stall_item_id) ~= item_id then
 		st.zhopa2_gather_stall_item_id = item_id
 		st.zhopa2_gather_stall_next = now + ART.APPROACH_CHECK_MS
 		st.zhopa2_gather_stall_x = pos.x
@@ -3098,9 +3096,9 @@ function M.zhopa2_gather_stalled(npc, st, item_id, target_pos)
 	if st.zhopa2_gather_stall_next and now < st.zhopa2_gather_stall_next then
 		return false
 	end
-	local dx = pos.x - (tonumber(st.zhopa2_gather_stall_x) or pos.x)
-	local dy = pos.y - (tonumber(st.zhopa2_gather_stall_y) or pos.y)
-	local dz = pos.z - (tonumber(st.zhopa2_gather_stall_z) or pos.z)
+	local dx = pos.x - (tonum(st.zhopa2_gather_stall_x) or pos.x)
+	local dy = pos.y - (tonum(st.zhopa2_gather_stall_y) or pos.y)
+	local dz = pos.z - (tonum(st.zhopa2_gather_stall_z) or pos.z)
 	local moved_sqr = dx * dx + dy * dy + dz * dz
 	if moved_sqr > ART.APPROACH_PROGRESS_EPS_SQR then
 		st.zhopa2_gather_stall_bad_ticks = 0
@@ -3108,10 +3106,10 @@ function M.zhopa2_gather_stalled(npc, st, item_id, target_pos)
 		st.zhopa2_gather_stall_y = pos.y
 		st.zhopa2_gather_stall_z = pos.z
 	else
-		st.zhopa2_gather_stall_bad_ticks = (tonumber(st.zhopa2_gather_stall_bad_ticks) or 0) + 1
+		st.zhopa2_gather_stall_bad_ticks = (tonum(st.zhopa2_gather_stall_bad_ticks) or 0) + 1
 	end
 	st.zhopa2_gather_stall_next = now + ART.APPROACH_CHECK_MS
-	return (tonumber(st.zhopa2_gather_stall_bad_ticks) or 0) >= ART.APPROACH_BAD_TICKS
+	return (tonum(st.zhopa2_gather_stall_bad_ticks) or 0) >= ART.APPROACH_BAD_TICKS
 end
 
 local function zhopa2_prepare_next_artifact_approach(npc, st, item, item_pos, reason)
@@ -3210,13 +3208,14 @@ local function zhopa2_add_gather_precondition(manager, action_id)
 end
 
 local function zhopa2_job_action_key(root)
+	local tostr = tostring
 	if not root then
 		return "-"
 	end
-	return tostring(root.active_scheme or "-")
-		.. "|" .. tostring(root.active_section or "-")
-		.. "|" .. tostring(root.job_ini or root.ini_filename or "-")
-		.. "|" .. tostring(root.stype or "-")
+	return tostr(root.active_scheme or "-")
+		.. "|" .. tostr(root.active_section or "-")
+		.. "|" .. tostr(root.job_ini or root.ini_filename or "-")
+		.. "|" .. tostr(root.stype or "-")
 end
 
 local function zhopa2_suspend_active_scheme_for_targeted_gather(npc, st)
@@ -3397,12 +3396,13 @@ local function zhopa2_reset_gather_state(st)
 end
 
 local function zhopa2_item_reservation_owner_impl(item_id)
+	local tonum = tonumber
 	local owner_id = zhopa2_item_reserved_by(item_id)
 	if not owner_id then
 		return nil, false, false
 	end
 	local st = db and db.storage and db.storage[owner_id] and db.storage[owner_id].gather_items or nil
-	return owner_id, st and tonumber(st.selected_id) == tonumber(item_id), st and tonumber(st.zhopa2_targeted_item_id) == tonumber(item_id)
+	return owner_id, st and tonum(st.selected_id) == tonum(item_id), st and tonum(st.zhopa2_targeted_item_id) == tonum(item_id)
 end
 
 local function zhopa2_prepare_targeted_gather_impl(npc, item_id)
@@ -3421,7 +3421,8 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 		return false, "force_bad_args"
 	end
 	local targeted = targeted ~= false
-	local st = db.storage[npc:id()] and db.storage[npc:id()].gather_items
+	local npc_id = npc:id()
+	local st = db.storage[npc_id] and db.storage[npc_id].gather_items
 	if not st then
 		return false, "force_no_storage"
 	end
@@ -3436,7 +3437,7 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	end
 	if targeted then
 		zhopa2_suspend_active_scheme_for_targeted_gather(npc, st)
-		st = db.storage[npc:id()] and db.storage[npc:id()].gather_items
+		st = db.storage[npc_id] and db.storage[npc_id].gather_items
 		if not st then
 			return false, "force_no_storage"
 		end
@@ -3447,7 +3448,7 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	st.__dtimer = 0
 	local items = gather_items_table()
 	local reserved_by = zhopa2_item_reserved_by(item_id)
-	if reserved_by and reserved_by ~= npc:id() then
+	if reserved_by and reserved_by ~= npc_id then
 		if zhopa2_reservation_is_live(reserved_by, item_id) then
 			return false, "force_reserved_by:" .. tostring(reserved_by)
 		end
@@ -3491,25 +3492,26 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	st.zhopa2_approach_index = approach_index
 	st.zhopa2_approach_pos = approach_pos
 	st.zhopa2_approach_final = approach_final == true
-	items[item_id] = npc:id()
+	items[item_id] = npc_id
 	zhopa2_apply_job_preconditions(npc, st)
 	return true, "force_started"
 end
 
 function zhopa2_clear_gather_item(npc, item_id, reason)
-	item_id = tonumber(item_id)
+	local tonum = tonumber
+	item_id = tonum(item_id)
 	local st = npc and db and db.storage and db.storage[npc:id()] and db.storage[npc:id()].gather_items
 	if not (item_id and st) then
 		return false
 	end
 	local items = gather_items_table()
-	if items and tonumber(items[item_id]) == tonumber(npc:id()) then
+	if items and tonum(items[item_id]) == tonum(npc:id()) then
 		items[item_id] = nil
 	end
-	if tonumber(st.selected_id) == item_id then
+	if tonum(st.selected_id) == item_id then
 		zhopa2_reset_gather_state(st)
 	end
-	if tonumber(st.zhopa2_targeted_item_id) == item_id then
+	if tonum(st.zhopa2_targeted_item_id) == item_id then
 		st.zhopa2_targeted_item_id = nil
 	end
 	zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
@@ -3517,7 +3519,7 @@ function zhopa2_clear_gather_item(npc, item_id, reason)
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
-	if not (npc and st and zhopa2_loot_active(npc) and level and alife_object) then
+	if not (npc and st and zhopa2_loot_active(npc) and level and type(level.object_by_id) == "function" and alife_object) then
 		return false
 	end
 	local best_id = nil
@@ -3531,8 +3533,11 @@ function M.zhopa2_try_force_online_gather_item(npc, st)
 		end
 		seen[item_id] = true
 		local obj = level.object_by_id(item_id)
-		local se_obj = obj and alife_object(item_id)
-		if not (obj and se_obj and se_obj.parent_id == 65535) then
+		if not obj then
+			return
+		end
+		local se_obj = alife_object(item_id)
+		if not (se_obj and se_obj.parent_id == 65535) then
 			return
 		end
 		if get_object_story_id and get_object_story_id(item_id) then
@@ -3572,20 +3577,27 @@ function M.zhopa2_try_force_online_gather_item(npc, st)
 end
 
 function M.zhopa2_gather_item_active(npc, item_id)
+	local tonum = tonumber
 	if not (npc and item_id and db and db.storage) then
 		return false
 	end
 	local st = db.storage[npc:id()] and db.storage[npc:id()].gather_items
-	if not (st and tonumber(st.selected_id) == tonumber(item_id)) then
+	if not (st and tonum(st.selected_id) == tonum(item_id)) then
 		return false
 	end
-	local mgr = npc:motivation_action_manager()
+	local mgr = type(npc.motivation_action_manager) == "function" and npc:motivation_action_manager() or nil
 	local gather = gather_mod()
 	local gather_actid = (gather and gather.actid) or rawget(_G, "actid")
-	if mgr and gather_actid and mgr:initialized() and tonumber(mgr:current_action_id()) == tonumber(gather_actid) then
+	if mgr
+		and gather_actid
+		and type(mgr.initialized) == "function"
+		and type(mgr.current_action_id) == "function"
+		and mgr:initialized()
+		and tonum(mgr:current_action_id()) == tonum(gather_actid)
+	then
 		return true
 	end
-	if tonumber(st.zhopa2_targeted_item_id) == tonumber(item_id) then
+	if tonum(st.zhopa2_targeted_item_id) == tonum(item_id) then
 		return false
 	end
 	local state = state_mgr and state_mgr.get_state and state_mgr.get_state(npc) or nil
@@ -3604,6 +3616,7 @@ local function zhopa2_gather_item_failure_reason_impl(npc, item_id)
 end
 
 local function zhopa2_gather_item_debug_status_impl(npc, item_id)
+	local tostr = tostring
 	if not (npc and item_id and db and db.storage) then
 		return nil
 	end
@@ -3611,8 +3624,11 @@ local function zhopa2_gather_item_debug_status_impl(npc, item_id)
 	if not st then
 		return "gather=no_storage"
 	end
-	local mgr = npc:motivation_action_manager()
-	local action_id = mgr and mgr:initialized() and mgr:current_action_id() or nil
+	local mgr = type(npc.motivation_action_manager) == "function" and npc:motivation_action_manager() or nil
+	local action_id = nil
+	if mgr and type(mgr.initialized) == "function" and type(mgr.current_action_id) == "function" and mgr:initialized() then
+		action_id = mgr:current_action_id()
+	end
 	local state = state_mgr and state_mgr.get_state and state_mgr.get_state(npc) or nil
 	local item = level and level.object_by_id(tonumber(item_id)) or nil
 	local item_pos = item and item:position() or nil
@@ -3622,18 +3638,18 @@ local function zhopa2_gather_item_debug_status_impl(npc, item_id)
 	local dist_vid = valid_vid and vid_pos and npc_pos and npc_pos:distance_to(vid_pos) or nil
 	return string.format(
 		"gather selected=%s targeted=%s action=%s/%s state=%s stage=%s vid=%s valid_vid=%s approach=%s final=%s dist_item=%s dist_vid=%s",
-		tostring(st.selected_id or "-"),
-		tostring(st.zhopa2_targeted_item_id or "-"),
-		tostring(action_id or "-"),
-		tostring((gather_mod() and gather_mod().actid) or rawget(_G, "actid") or "-"),
-		tostring(state or "-"),
-		tostring(st.stage or "-"),
-		tostring(st.vid or "-"),
-		tostring(valid_vid == true),
-		tostring(st.zhopa2_approach_index or "-"),
-		tostring(st.zhopa2_approach_final == true),
-		tostring(dist_item and math.floor(dist_item * 100) / 100 or "-"),
-		tostring(dist_vid and math.floor(dist_vid * 100) / 100 or "-")
+		tostr(st.selected_id or "-"),
+		tostr(st.zhopa2_targeted_item_id or "-"),
+		tostr(action_id or "-"),
+		tostr((gather_mod() and gather_mod().actid) or rawget(_G, "actid") or "-"),
+		tostr(state or "-"),
+		tostr(st.stage or "-"),
+		tostr(st.vid or "-"),
+		tostr(valid_vid == true),
+		tostr(st.zhopa2_approach_index or "-"),
+		tostr(st.zhopa2_approach_final == true),
+		tostr(dist_item and math.floor(dist_item * 100) / 100 or "-"),
+		tostr(dist_vid and math.floor(dist_vid * 100) / 100 or "-")
 	)
 end
 
@@ -3741,10 +3757,11 @@ local function patch_gather_classes(mod)
 	if eva then
 		M.patch_method(eva, "find_valid_item", PATCH_ID .. "_gather_find", function(original)
 			return function(self, ...)
+				local tonum = tonumber
 				local npc = self.object
 				local st = self.st
 				local active = zhopa2_loot_active(npc)
-				local selected_id = st and tonumber(st.selected_id) or nil
+				local selected_id = st and tonum(st.selected_id) or nil
 				if selected_id then
 					if zhopa2_item_reserved_for_other(npc, selected_id) then
 						local items = gather_items_table()
@@ -3767,7 +3784,7 @@ local function patch_gather_classes(mod)
 				local has_targeted_request = false
 				if targeted_ids then
 					for i = 1, #targeted_ids do
-						local item_id = tonumber(targeted_ids[i])
+						local item_id = tonum(targeted_ids[i])
 						if item_id then
 							has_targeted_request = true
 							local ok = zhopa2_force_gather_item(npc, item_id)
@@ -3790,7 +3807,7 @@ local function patch_gather_classes(mod)
 					local max_dist = zhopa2_item_detect_dist_sqr()
 					if item_ids then
 						for i = 1, #item_ids do
-							local item_id = tonumber(item_ids[i])
+							local item_id = tonum(item_ids[i])
 							local obj = item_id and level and level.object_by_id(item_id)
 							local se_obj = item_id and alife_object and alife_object(item_id)
 							if item_id and not seen[item_id] and obj and se_obj and se_obj.parent_id == 65535 and zhopa2_can_take_section(npc, obj, obj:section()) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
@@ -3811,7 +3828,7 @@ local function patch_gather_classes(mod)
 					error(original_result)
 				end
 				if original_result then
-					local original_selected = st and tonumber(st.selected_id) or nil
+					local original_selected = st and tonum(st.selected_id) or nil
 					if original_selected and zhopa2_item_reserved_for_other(npc, original_selected) then
 						local items = gather_items_table()
 						items[original_selected] = nil
@@ -3870,6 +3887,7 @@ local function patch_gather_classes(mod)
 		end)
 		M.patch_method(act, "execute", PATCH_ID .. "_gather_execute", function(original)
 			return function(self, ...)
+				local tostr = tostring
 				local st = self.st
 				local npc = self.object
 				local item_id = st and tonumber(st.selected_id) or nil
@@ -3930,13 +3948,13 @@ local function patch_gather_classes(mod)
 								fn(npc)
 							elseif st.zhopa2_pickup_fail_logged ~= item_id then
 								st.zhopa2_pickup_fail_logged = item_id
-								zhopa2_debug_printf("~ ZHOPA2 loot error | reason [gather_pickup_no_function] npc [%s] item [%s:%s]", tostring(npc and npc.id and npc:id() or "-"), tostring(item_id or "-"), tostring(itm and itm:section() or "-"))
+								zhopa2_debug_printf("~ ZHOPA2 loot error | reason [gather_pickup_no_function] npc [%s] item [%s:%s]", tostr(npc and npc.id and npc:id() or "-"), tostr(item_id or "-"), tostr(itm and itm:section() or "-"))
 							end
 						end
 						local after_se = item_id and alife_object and alife_object(item_id) or nil
 						if active_selected and after_se and after_se.parent_id == 65535 and st.zhopa2_pickup_fail_logged ~= item_id then
 							st.zhopa2_pickup_fail_logged = item_id
-							zhopa2_debug_printf("~ ZHOPA2 loot error | reason [online_gather_pickup_failed] npc [%s] item [%s:%s] parent [%s] selected [%s]", tostring(npc and npc.id and npc:id() or "-"), tostring(item_id or "-"), tostring(itm and itm:section() or "-"), tostring(after_se.parent_id or "-"), tostring(st and st.selected_id or "-"))
+							zhopa2_debug_printf("~ ZHOPA2 loot error | reason [online_gather_pickup_failed] npc [%s] item [%s:%s] parent [%s] selected [%s]", tostr(npc and npc.id and npc:id() or "-"), tostr(item_id or "-"), tostr(itm and itm:section() or "-"), tostr(after_se.parent_id or "-"), tostr(st and st.selected_id or "-"))
 						end
 					end
 					return

@@ -175,12 +175,13 @@ local function normalize_status_map(src)
 end
 
 local function event_state()
-	if type(state) ~= "table" then
+	local type_ = type
+	if type_(state) ~= "table" then
 		state = {}
 	end
-	state.selected_by_sid = type(state.selected_by_sid) == "table" and state.selected_by_sid or {}
-	state.status_by_sid = type(state.status_by_sid) == "table" and state.status_by_sid or {}
-	state.retargeted_by_sid = type(state.retargeted_by_sid) == "table" and state.retargeted_by_sid or {}
+	state.selected_by_sid = type_(state.selected_by_sid) == "table" and state.selected_by_sid or {}
+	state.status_by_sid = type_(state.status_by_sid) == "table" and state.status_by_sid or {}
+	state.retargeted_by_sid = type_(state.retargeted_by_sid) == "table" and state.retargeted_by_sid or {}
 	state.fired = state.fired == true
 	state.legacy_skipped = state.legacy_skipped == true
 	return state
@@ -212,14 +213,15 @@ local function resolve_object(id)
 end
 
 local function object_level(obj)
+	local type_ = type
 	local p = perception_mod()
-	if p and type(p.obj_level) == "function" then
+	if p and type_(p.obj_level) == "function" then
 		local ok, level_name = pcall(p.obj_level, obj)
-		if ok and type(level_name) == "string" and level_name ~= "" then
+		if ok and type_(level_name) == "string" and level_name ~= "" then
 			return level_name
 		end
 	end
-	if not (obj and obj.m_game_vertex_id and type(game_graph) == "function" and type(alife) == "function") then
+	if not (obj and obj.m_game_vertex_id and type_(game_graph) == "function" and type_(alife) == "function") then
 		return nil
 	end
 	local ok_gg, gg = pcall(game_graph)
@@ -530,22 +532,23 @@ local function target_safe_for_squad(squad, smart, expected_level, kind)
 end
 
 local function game_graph_distance(a, b)
-	local ag = tonumber(a and a.m_game_vertex_id)
-	local bg = tonumber(b and b.m_game_vertex_id)
+	local tonum = tonumber
+	local ag = tonum(a and a.m_game_vertex_id)
+	local bg = tonum(b and b.m_game_vertex_id)
 	if ag and bg and game_graph then
 		local ok, distance = pcall(function()
 			return game_graph():distance(ag, bg)
 		end)
-		if ok and tonumber(distance) then
-			return tonumber(distance)
+		if ok and tonum(distance) then
+			return tonum(distance)
 		end
 	end
 	if a and b and a.position and b.position then
 		local ok, distance = pcall(function()
 			return a.position:distance_to(b.position)
 		end)
-		if ok and tonumber(distance) then
-			return tonumber(distance)
+		if ok and tonum(distance) then
+			return tonum(distance)
 		end
 	end
 	return DISTANCE_FALLBACK
@@ -841,6 +844,7 @@ local function sync_live_target(squad)
 end
 
 local function story_arrived(squad, smart)
+	local tonum = tonumber
 	if not (squad and smart) then
 		return false
 	end
@@ -853,8 +857,8 @@ local function story_arrived(squad, smart)
 			return true
 		end
 	end
-	local sg = tonumber(squad.m_game_vertex_id)
-	local tg = tonumber(smart.m_game_vertex_id)
+	local sg = tonum(squad.m_game_vertex_id)
+	local tg = tonum(smart.m_game_vertex_id)
 	if sg and tg and sg == tg then
 		return true
 	end
@@ -862,16 +866,17 @@ local function story_arrived(squad, smart)
 		local ok, dist_sqr = pcall(function()
 			return squad.position:distance_to_sqr(smart.position)
 		end)
-		local arrive = tonumber(smart.arrive_dist) or 5
+		local arrive = tonum(smart.arrive_dist) or 5
 		if arrive > 5 then
 			arrive = 5
 		end
-		return ok and tonumber(dist_sqr) and tonumber(dist_sqr) <= arrive * arrive
+		return ok and tonum(dist_sqr) and tonum(dist_sqr) <= arrive * arrive
 	end
 	return false
 end
 
 local function assign_story_target(squad, sid, smart, level_name, source)
+	local tostr = tostring
 	if not (squad and smart and smart.id and type(squad.zhopa2_assign_task) == "function") then
 		return false
 	end
@@ -882,18 +887,19 @@ local function assign_story_target(squad, sid, smart, level_name, source)
 	squad.zhopa2_last_result = "story_north_migration"
 	debug_log(
 		"~ ZHOPA2 north migration | assign squad [%s:%s] faction [%s] target [%s:%s] level [%s] source [%s]",
-		tostring(safe_name(squad) or "-"),
-		tostring(sid or "-"),
-		tostring(squad_faction(squad) or "-"),
-		tostring(safe_name(smart) or "-"),
-		tostring(smart.id or "-"),
-		tostring(level_name or "-"),
-		tostring(source or "-")
+		tostr(safe_name(squad) or "-"),
+		tostr(sid or "-"),
+		tostr(squad_faction(squad) or "-"),
+		tostr(safe_name(smart) or "-"),
+		tostr(smart.id or "-"),
+		tostr(level_name or "-"),
+		tostr(source or "-")
 	)
 	return true
 end
 
 local function retarget_story_task(squad, sid, current_target, reason)
+	local tostr = tostring
 	local event = event_state()
 	if event.retargeted_by_sid[sid] == true then
 		clear_story_task(squad, reason or "story_north_target_unsafe")
@@ -912,13 +918,13 @@ local function retarget_story_task(squad, sid, current_target, reason)
 	if assign_story_target(squad, sid, smart, level_name, "story_north_retarget") then
 		debug_log(
 			"~ ZHOPA2 north migration | retarget squad [%s:%s] from [%s] to [%s:%s] level [%s] reason [%s]",
-			tostring(safe_name(squad) or "-"),
-			tostring(sid or "-"),
-			tostring(current_target or "-"),
-			tostring(safe_name(smart) or "-"),
-			tostring(smart.id or "-"),
-			tostring(level_name or "-"),
-			tostring(reason or "-")
+			tostr(safe_name(squad) or "-"),
+			tostr(sid or "-"),
+			tostr(current_target or "-"),
+			tostr(safe_name(smart) or "-"),
+			tostr(smart.id or "-"),
+			tostr(level_name or "-"),
+			tostr(reason or "-")
 		)
 		return true
 	end
@@ -927,6 +933,7 @@ local function retarget_story_task(squad, sid, current_target, reason)
 end
 
 local function activate_selected_sid(sid, source, squad)
+	local tostr = tostring
 	sid = normalize_id(sid)
 	if not (sid and M.is_sid_selected(sid)) then
 		return false
@@ -959,12 +966,12 @@ local function activate_selected_sid(sid, source, squad)
 				local rest_ok = assign_rest(squad, "story_north_arrived")
 				debug_log(
 					"~ ZHOPA2 north migration | arrived squad [%s:%s] target [%s:%s] level [%s] rest [%s]",
-					tostring(safe_name(squad) or "-"),
-					tostring(sid or "-"),
-					tostring(safe_name(smart) or "-"),
-					tostring(smart and smart.id or "-"),
-					tostring(target_level or "-"),
-					tostring(rest_ok == true)
+					tostr(safe_name(squad) or "-"),
+					tostr(sid or "-"),
+					tostr(safe_name(smart) or "-"),
+					tostr(smart and smart.id or "-"),
+					tostr(target_level or "-"),
+					tostr(rest_ok == true)
 				)
 				return true
 			end
@@ -1008,6 +1015,7 @@ local function collect_eligible_sids()
 end
 
 local function maybe_fire(source)
+	local tostr = tostring
 	local event = event_state()
 	if event.fired == true or rollout_running == true then
 		return false
@@ -1039,10 +1047,10 @@ local function maybe_fire(source)
 	end
 	debug_log(
 		"~ ZHOPA2 north migration | fire source [%s] eligible [%s] selected [%s] percent [%s]",
-		tostring(source or "-"),
-		tostring(#eligible),
-		tostring(selected_count),
-		tostring(percent)
+		tostr(source or "-"),
+		tostr(#eligible),
+		tostr(selected_count),
+		tostr(percent)
 	)
 	for i = 1, selected_count do
 		activate_selected_sid(eligible[i], "story_north_rollout")

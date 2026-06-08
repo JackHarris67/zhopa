@@ -631,13 +631,14 @@ local function bool_key(value)
 end
 
 local function smart_options_signature(squad, options, levels)
+	local tostr = tostring
 	return table.concat({
-		tostring(squad and squad.id or ""),
-		tostring(squad and squad.smart_id or ""),
-		tostring(options.level_mode or "current_or_nearby"),
-		tostring(options.current_level or ""),
+		tostr(squad and squad.id or ""),
+		tostr(squad and squad.smart_id or ""),
+		tostr(options.level_mode or "current_or_nearby"),
+		tostr(options.current_level or ""),
 		list_key(levels),
-		tostring(options.kind or ""),
+		tostr(options.kind or ""),
 		bool_key(options.safe_rest),
 		bool_key(options.populate),
 		bool_key(options.has_prey),
@@ -651,13 +652,14 @@ local function smart_options_signature(squad, options, levels)
 end
 
 local function hunt_options_signature(squad, options, levels)
+	local tostr = tostring
 	return table.concat({
-		tostring(squad and squad.id or ""),
-		tostring(squad and squad.smart_id or ""),
-		tostring(options.level_mode or "current_or_nearby"),
-		tostring(options.current_level or ""),
+		tostr(squad and squad.id or ""),
+		tostr(squad and squad.smart_id or ""),
+		tostr(options.level_mode or "current_or_nearby"),
+		tostr(options.current_level or ""),
 		list_key(levels),
-		tostring(options.prey or ""),
+		tostr(options.prey or ""),
 		bool_key(options.ignore_recent),
 		bool_key(options.allow_recent_fallback),
 	}, "|")
@@ -679,21 +681,6 @@ local function squad_member_registered_at_smart(smart, squad)
 		for member in squad:squad_members() do
 			local id = member and member.id
 			if id and smart.npc_info[id] then
-				return true
-			end
-		end
-		return false
-	end)
-	return ok and found == true
-end
-
-local function squad_contains_member_id(squad, obj_id)
-	if not (squad and obj_id and type(squad.squad_members) == "function") then
-		return false
-	end
-	local ok, found = pcall(function()
-		for member in squad:squad_members() do
-			if member and member.id == obj_id then
 				return true
 			end
 		end
@@ -773,23 +760,25 @@ local function safe_zone_squad(squad)
 end
 
 local function squad_targets_smart(other, smart)
+	local tonum = tonumber
 	if not (other and smart and smart.id) then
 		return false
 	end
-	local smart_id = tonumber(smart.id)
-	return tonumber(other.smart_id) == smart_id
-		or tonumber(other.assigned_target_id) == smart_id
-		or tonumber(other.current_target_id) == smart_id
-		or tonumber(other.zhopa2_target) == smart_id
-		or tonumber(other.scripted_target) == smart_id
+	local smart_id = tonum(smart.id)
+	return tonum(other.smart_id) == smart_id
+		or tonum(other.assigned_target_id) == smart_id
+		or tonum(other.current_target_id) == smart_id
+		or tonum(other.zhopa2_target) == smart_id
+		or tonum(other.scripted_target) == smart_id
 end
 
 local function squad_target_smart_id(other)
+	local tonum = tonumber
 	return other and (
-		tonumber(other.zhopa2_target)
-		or tonumber(other.assigned_target_id)
-		or tonumber(other.current_target_id)
-		or tonumber(other.smart_id)
+		tonum(other.zhopa2_target)
+		or tonum(other.assigned_target_id)
+		or tonum(other.current_target_id)
+		or tonum(other.smart_id)
 	) or nil
 end
 
@@ -1477,6 +1466,7 @@ function M.collect_hunt_targets(squad, opts)
 end
 
 local function squad_distance_uncached(squad, target)
+	local tonum = tonumber
 	if not (squad and target) then
 		return nil
 	end
@@ -1484,14 +1474,14 @@ local function squad_distance_uncached(squad, target)
 		local ok, dist = pcall(function()
 			return squad.position:distance_to(target.position)
 		end)
-		if ok and tonumber(dist) then
-			return tonumber(dist)
+		if ok and tonum(dist) then
+			return tonum(dist)
 		end
 	end
 	if utils_obj and type(utils_obj.graph_distance) == "function" and squad.m_game_vertex_id and target.m_game_vertex_id then
 		local ok, dist = pcall(utils_obj.graph_distance, squad.m_game_vertex_id, target.m_game_vertex_id)
-		if ok and tonumber(dist) then
-			return tonumber(dist)
+		if ok and tonum(dist) then
+			return tonum(dist)
 		end
 	end
 	return nil

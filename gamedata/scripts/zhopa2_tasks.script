@@ -15,7 +15,6 @@ M.TASK_STORY_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
 
 local ACTOR_TARGET_ID = AC_ID or 0
 local REVENGE_GOODWILL = -3000
-local REVENGE_RELATION_ENEMY = "enemy"
 local TASK_SELECT_ATTEMPTS = 2
 local ASSIGNMENTS_PER_FRAME = 1
 local HUNT_NO_TARGET_COOLDOWN_SEC = 20
@@ -150,9 +149,10 @@ local function current_hour()
 end
 
 local function surge_active_uncached()
+	local type_ = type
 	local xc = rawget(_G, "xr_conditions")
 	local xf = xc and xc.surge_started or nil
-	if type(xf) == "function" then
+	if type_(xf) == "function" then
 		local ok, res = pcall(xf)
 		if ok and res == true then
 			return true
@@ -162,7 +162,7 @@ local function surge_active_uncached()
 	end
 
 	local psm = rawget(_G, "psi_storm_manager")
-	if psm and type(psm.is_loaded) == "function" and type(psm.is_started) == "function" then
+	if psm and type_(psm.is_loaded) == "function" and type_(psm.is_started) == "function" then
 		local ok_loaded, loaded = pcall(function()
 			return psm.is_loaded()
 		end)
@@ -177,7 +177,7 @@ local function surge_active_uncached()
 	end
 
 	local sm = rawget(_G, "surge_manager")
-	if sm and type(sm.is_loaded) == "function" and type(sm.is_started) == "function" then
+	if sm and type_(sm.is_loaded) == "function" and type_(sm.is_started) == "function" then
 		local ok_loaded, loaded = pcall(function()
 			return sm.is_loaded()
 		end)
@@ -191,7 +191,7 @@ local function surge_active_uncached()
 		end
 	end
 
-	if level and type(level.is_surge) == "function" then
+	if level and type_(level.is_surge) == "function" then
 		local ok, res = pcall(function()
 			return level.is_surge()
 		end)
@@ -340,6 +340,7 @@ local function named_id(obj_or_id)
 end
 
 local function debug_trade_log(squad, stage, result, detail)
+	local tostr = tostring
 	if not TRADE_DIAGNOSTIC_LOGGING_ENABLED then
 		return
 	end
@@ -350,7 +351,7 @@ local function debug_trade_log(squad, stage, result, detail)
 		return
 	end
 	local squad_id = object_id(squad) or "-"
-	local key = tostring(squad_id) .. ":" .. tostring(stage) .. ":" .. tostring(result)
+	local key = tostr(squad_id) .. ":" .. tostr(stage) .. ":" .. tostr(result)
 	local now = now_ms()
 	local last = trade_debug_throttle[key]
 	if last and now > 0 and now - last < TRADE_DEBUG_THROTTLE_MS then
@@ -362,20 +363,20 @@ local function debug_trade_log(squad, stage, result, detail)
 	local last_trade = squad and squad.zhopa2_last_trade_result or "-"
 	local trade_detail = squad and squad.zhopa2_trade_detail or nil
 	if trade_detail and trade_detail ~= "" then
-		detail = tostring(detail or "-") .. "; " .. tostring(trade_detail)
+		detail = tostr(detail or "-") .. "; " .. tostr(trade_detail)
 	end
 	if type(printf) == "function" then
 		pcall(
 			printf,
 			"~ ZHOPA2 trade debug | stage [%s] result [%s] squad [%s] task [%s] smart [%s] target [%s] last_trade [%s] detail [%s]",
-			tostring(stage or "-"),
-			tostring(result or "-"),
+			tostr(stage or "-"),
+			tostr(result or "-"),
 			named_id(squad),
-			tostring(squad and squad.zhopa2_task or "-"),
+			tostr(squad and squad.zhopa2_task or "-"),
 			named_id(smart_id),
 			named_id(target_id),
-			tostring(last_trade),
-			tostring(detail or "-")
+			tostr(last_trade),
+			tostr(detail or "-")
 		)
 	end
 end
@@ -440,11 +441,12 @@ local function task_no_target_cooldown_active(squad, task)
 end
 
 local function target_valid_cache_key(squad, task, target)
+	local tostr = tostring
 	return table.concat({
-		tostring(task or ""),
-		tostring(squad and squad.zhopa2_target or ""),
-		tostring(squad and squad.m_game_vertex_id or ""),
-		tostring(target and target.m_game_vertex_id or ""),
+		tostr(task or ""),
+		tostr(squad and squad.zhopa2_target or ""),
+		tostr(squad and squad.m_game_vertex_id or ""),
+		tostr(target and target.m_game_vertex_id or ""),
 	}, "|")
 end
 
@@ -1333,18 +1335,19 @@ local function mutant_time_inactive(squad)
 end
 
 local function clear_zhopa2_movement_target(squad, clear_any)
+	local tostr = tostring
 	if not (squad and squad.zhopa2_task) then
 		return
 	end
 	local target = tonumber(squad.zhopa2_target) or squad.zhopa2_target
 	local rest_target = squad.zhopa2_task == M.TASK_REST and squad.id or nil
-	if tostring(squad.scripted_target) == tostring(target) or (rest_target and tostring(squad.scripted_target) == tostring(rest_target)) then
+	if tostr(squad.scripted_target) == tostr(target) or (rest_target and tostr(squad.scripted_target) == tostr(rest_target)) then
 		squad.scripted_target = nil
 	end
 	if clear_any
-		or tostring(squad.assigned_target_id) == tostring(target)
-		or tostring(squad.current_target_id) == tostring(target)
-		or (rest_target and (tostring(squad.assigned_target_id) == tostring(rest_target) or tostring(squad.current_target_id) == tostring(rest_target)))
+		or tostr(squad.assigned_target_id) == tostr(target)
+		or tostr(squad.current_target_id) == tostr(target)
+		or (rest_target and (tostr(squad.assigned_target_id) == tostr(rest_target) or tostr(squad.current_target_id) == tostr(rest_target)))
 	then
 		squad.assigned_target_id = nil
 		squad.current_target_id = nil
@@ -1497,7 +1500,9 @@ local function actor_target_alive()
 	local actor = db and db.actor or nil
 	if not actor and alife then
 		local sim = alife()
-		actor = sim and sim:actor() or nil
+		if sim then
+			actor = sim:actor()
+		end
 	end
 	if not actor then
 		return false
@@ -1668,16 +1673,6 @@ local function set_online_relation(source, target, relation, goodwill)
 		return online_relation_matches(source, target, relation)
 	end
 	return false
-end
-
-local function set_squad_actor_relation(squad, relation)
-	if not (squad and type(squad.set_squad_relation) == "function") then
-		return false
-	end
-	local ok = pcall(function()
-		squad:set_squad_relation(relation)
-	end)
-	return ok == true
 end
 
 local function force_member_to_actor(member)
@@ -2045,13 +2040,15 @@ function M.assign_next_task(squad, reason)
 end
 
 function M.update_squad(squad, memory)
+	local tonum = tonumber
+	local type_ = type
 	if not squad then
 		return false
 	end
 	local mem = memory or memory_mod()
 
-	if type(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
-		if squad.zhopa2_task and type(squad.zhopa2_clear_task) == "function" then
+	if type_(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
+		if squad.zhopa2_task and type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task("unmanaged")
 		end
 		return false
@@ -2070,7 +2067,7 @@ function M.update_squad(squad, memory)
 	end
 
 	local force_target = force_exit_target(squad)
-	if force_target and (squad.zhopa2_task ~= M.TASK_FORCE_EXIT or tonumber(squad.zhopa2_target) ~= tonumber(force_target)) then
+	if force_target and (squad.zhopa2_task ~= M.TASK_FORCE_EXIT or tonum(squad.zhopa2_target) ~= tonum(force_target)) then
 		if squad.zhopa2_task == M.TASK_ARTEFACT then
 			M.release_artifact_task(squad, "blacklist_exit")
 		end
@@ -2087,7 +2084,7 @@ function M.update_squad(squad, memory)
 		if squad.zhopa2_task == M.TASK_ARTEFACT then
 			M.release_artifact_task(squad, "artifact_target_blacklisted")
 		end
-		if type(squad.zhopa2_clear_task) == "function" then
+		if type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task("target_blacklisted")
 		end
 		assign_rest(squad, blacklist_reason or "target_blacklisted")
@@ -2096,12 +2093,12 @@ function M.update_squad(squad, memory)
 	end
 
 	local north = story_north_mod()
-	if north and type(north.update_squad_tasks) == "function" and north.update_squad_tasks(squad, { prevalidated = true }) == true then
+	if north and type_(north.update_squad_tasks) == "function" and north.update_squad_tasks(squad, { prevalidated = true }) == true then
 		update_debug(squad)
 		return true
 	end
 
-	if type(squad.zhopa2_should_skip_budget) == "function" and squad:zhopa2_should_skip_budget() then
+	if type_(squad.zhopa2_should_skip_budget) == "function" and squad:zhopa2_should_skip_budget() then
 		return squad.zhopa2_task ~= nil
 	end
 
@@ -2113,7 +2110,7 @@ function M.update_squad(squad, memory)
 		}) then
 			return true
 		end
-		if type(squad.zhopa2_clear_task) == "function" then
+		if type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task("night_rest_target_unsafe")
 		end
 		assign_rest(squad, "night_rest_target_unsafe")
@@ -2134,7 +2131,7 @@ function M.update_squad(squad, memory)
 		}) then
 			return true
 		end
-		if type(squad.zhopa2_clear_task) == "function" then
+		if type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task("night_hunt_interrupt")
 		end
 		squad.zhopa2_last_result = "hunt_no_target"
@@ -2165,7 +2162,7 @@ function M.update_squad(squad, memory)
 			update_debug(squad)
 			return true
 		end
-		M.hunt_offline_tick(squad, alife_object(tonumber(squad.zhopa2_target) or squad.zhopa2_target))
+		M.hunt_offline_tick(squad, alife_object(tonum(squad.zhopa2_target) or squad.zhopa2_target))
 	end
 
 	if squad.zhopa2_task == M.TASK_REVENGE then
@@ -2175,7 +2172,7 @@ function M.update_squad(squad, memory)
 			update_debug(squad)
 			return true
 		end
-		local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+		local target_id = tonum(squad.zhopa2_target) or squad.zhopa2_target
 		M.apply_revenge_hostility(squad)
 		if target_id ~= ACTOR_TARGET_ID then
 			M.hunt_offline_tick(squad, alife_object(target_id), { force = true, result = "revenge_offline_battle" })
@@ -2183,10 +2180,10 @@ function M.update_squad(squad, memory)
 	end
 
 	if squad.zhopa2_task == M.TASK_ARTEFACT then
-		local reached_artifact_target = type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target()
+		local reached_artifact_target = type_(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target()
 		if reached_artifact_target or artefact_offline_collect_ready(squad) then
 			local artifacts = artifacts_mod()
-			if artifacts and type(artifacts.try_collect) == "function" then
+			if artifacts and type_(artifacts.try_collect) == "function" then
 				local done, artifact_reason = artifacts.try_collect(squad)
 				if done == true then
 					complete_artefact(squad, artifact_reason or "completed_ARTEFACT")
@@ -2218,7 +2215,7 @@ function M.update_squad(squad, memory)
 		end
 	end
 
-	if squad.zhopa2_task and type(squad.zhopa2_target_is_alive) == "function" and not squad:zhopa2_target_is_alive() then
+	if squad.zhopa2_task and type_(squad.zhopa2_target_is_alive) == "function" and not squad:zhopa2_target_is_alive() then
 		if squad.zhopa2_task == M.TASK_HUNT or squad.zhopa2_task == M.TASK_REVENGE then
 			if squad.zhopa2_task == M.TASK_REVENGE then
 				complete_revenge(squad, mem, squad.zhopa2_target, "revenge_target_missing")
@@ -2228,21 +2225,21 @@ function M.update_squad(squad, memory)
 			update_debug(squad)
 			return true
 		end
-		if type(squad.zhopa2_clear_task) == "function" then
+		if type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task("lost_target")
 		end
 		assign_rest(squad, "lost_target")
 		return true
 	end
 
-	if squad.zhopa2_task and type(squad.zhopa2_task_completed) == "function" and squad:zhopa2_task_completed() then
+	if squad.zhopa2_task and type_(squad.zhopa2_task_completed) == "function" and squad:zhopa2_task_completed() then
 		if rest_trade_blocks_completion(squad) then
 			update_debug(squad)
 			return true
 		end
 		local completed = squad.zhopa2_task
 		local completed_target = squad.zhopa2_target
-		if completed ~= M.TASK_REST and completed ~= M.TASK_HUNT and completed ~= M.TASK_REVENGE and mem and type(mem.add_recent_smart) == "function" then
+		if completed ~= M.TASK_REST and completed ~= M.TASK_HUNT and completed ~= M.TASK_REVENGE and mem and type_(mem.add_recent_smart) == "function" then
 			mem.add_recent_smart(squad, completed_target)
 		end
 		if completed == M.TASK_HUNT then
@@ -2253,16 +2250,16 @@ function M.update_squad(squad, memory)
 			complete_populate(squad, completed_target)
 		else
 			if completed == M.TASK_NIGHT_REST then
-				local traded, trade_result = try_after_night_rest_auto_trade(squad)
+				local _, trade_result = try_after_night_rest_auto_trade(squad)
 				if trade_result == "runtime_not_ready" then
 					update_debug(squad)
 					return true
 				end
 			end
-			if type(squad.zhopa2_clear_task) == "function" then
+			if type_(squad.zhopa2_clear_task) == "function" then
 				squad:zhopa2_clear_task("completed_" .. tostring(completed))
 			end
-			if completed == M.TASK_NIGHT_REST and mem and type(mem.resume_task) == "function" and mem.resume_task(squad, "resume_after_night_rest") then
+			if completed == M.TASK_NIGHT_REST and mem and type_(mem.resume_task) == "function" and mem.resume_task(squad, "resume_after_night_rest") then
 			-- resumed from memory
 			elseif completed == M.TASK_REST or completed == M.TASK_NIGHT_REST then
 				M.assign_next_task(squad, "after_" .. tostring(completed))

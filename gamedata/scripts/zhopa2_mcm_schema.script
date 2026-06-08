@@ -49,6 +49,11 @@ local OPTION_DEFS = {
 	loot_offline_real_enabled = { type = "check", val = 1, def = true },
 }
 
+for key, def in pairs(OPTION_DEFS) do
+	def.text = def.text or ("ui_mcm_zhopa2_" .. key)
+	def.hint = def.hint or ("ui_mcm_zhopa2_" .. key .. "_desc")
+end
+
 local PANELS = {
 	{
 		id = "general",

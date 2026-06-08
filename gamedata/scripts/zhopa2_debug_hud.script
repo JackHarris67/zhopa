@@ -20,7 +20,6 @@ local faction_spots = {
 
 local owned_spots = {}
 local squad_spot_ids = {}
-local callbacks_registered = false
 
 local function enabled()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -232,22 +231,23 @@ local function story_status_line(squad)
 end
 
 local function build_hint(squad)
+	local tostr = tostring
 	local lines = {
 		"ZHOPA ALIFE 2",
-		strformat("squad: %s", tostring(squad.name and squad:name() or "-")),
-		strformat("id: %s", tostring(squad.id or "-")),
-		strformat("faction: %s", tostring(squad.player_id or "-")),
-		strformat("task: %s", tostring(squad.zhopa2_task or "NO_TASK")),
+		strformat("squad: %s", tostr(squad.name and squad:name() or "-")),
+		strformat("id: %s", tostr(squad.id or "-")),
+		strformat("faction: %s", tostr(squad.player_id or "-")),
+		strformat("task: %s", tostr(squad.zhopa2_task or "NO_TASK")),
 		strformat("target: %s", smart_name(squad.zhopa2_target)),
 		strformat("smart: %s", smart_name(squad.smart_id)),
 		strformat("base owner: %s", base_ownership(squad)),
 		strformat("base presence: %s", base_presence(squad)),
-		strformat("level: %s", tostring(obj_level(squad) or "-")),
-		strformat("action: %s", tostring(squad.current_action or "-")),
+		strformat("level: %s", tostr(obj_level(squad) or "-")),
+		strformat("action: %s", tostr(squad.current_action or "-")),
 		strformat("route: %s", route_state(squad)),
 		strformat("timer: %s", task_timer(squad)),
-		strformat("reason: %s", tostring(squad.zhopa2_last_reason or "-")),
-		strformat("result: %s", tostring(squad.zhopa2_last_result or "-")),
+		strformat("reason: %s", tostr(squad.zhopa2_last_reason or "-")),
+		strformat("result: %s", tostr(squad.zhopa2_last_result or "-")),
 	}
 	local story_line = story_status_line(squad)
 	if story_line then
@@ -347,15 +347,12 @@ end
 
 function on_game_start()
 	if not RegisterScriptCallback then
-		callbacks_registered = false
 		return
 	end
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
 		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 	end
-	local ok = true
-	ok = pcall(RegisterScriptCallback, "on_game_load", on_game_load) and ok
-	ok = pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update) and ok
-	callbacks_registered = ok == true
+	pcall(RegisterScriptCallback, "on_game_load", on_game_load)
+	pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 end

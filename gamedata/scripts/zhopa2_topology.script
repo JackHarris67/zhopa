@@ -114,8 +114,9 @@ local function is_level_changer(se_obj, type_name)
 end
 
 local function remove_level_changer(se_obj)
+	local type_ = type
 	local id = nil
-	if type(se_obj) == "number" or type(se_obj) == "string" then
+	if type_(se_obj) == "number" or type_(se_obj) == "string" then
 		id = tonumber(se_obj)
 	elseif se_obj then
 		id = tonumber(se_obj.id)
@@ -126,12 +127,12 @@ local function remove_level_changer(se_obj)
 
 	local prev = edges_by_id[id]
 	edges_by_id[id] = nil
-	if type(prev) ~= "table" then
+	if type_(prev) ~= "table" then
 		return false
 	end
 
 	local bucket = edges_by_level[prev.source_level]
-	if type(bucket) == "table" then
+	if type_(bucket) == "table" then
 		bucket[prev.dest_level] = nil
 		if next(bucket) == nil then
 			edges_by_level[prev.source_level] = nil

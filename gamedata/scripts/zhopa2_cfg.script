@@ -1,5 +1,4 @@
 local SETTINGS_SECTION = "zhopa2"
-local MCM_ROOT = "zhopa2"
 
 local settings_ini = ini_file_ex("zhopa2_settings.ltx")
 local blacklists_ini = ini_file_ex("zhopa2_smart_blacklists.ltx")

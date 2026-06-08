@@ -274,6 +274,7 @@ local function bool_text(value)
 end
 
 local function artifact_bucket_debug(idx, smart_id, focus_id)
+	local tostr = tostring
 	if not (idx and smart_id) then
 		return "smart_bucket=none"
 	end
@@ -286,11 +287,11 @@ local function artifact_bucket_debug(idx, smart_id, focus_id)
 			if #parts < 8 then
 				parts[#parts + 1] = string.format(
 					"%s:%s:valid=%s:reserved=%s%s",
-					tostring(artifact_id),
-					tostring(idx.artifact_section and idx.artifact_section[artifact_id] or "-"),
+					tostr(artifact_id),
+					tostr(idx.artifact_section and idx.artifact_section[artifact_id] or "-"),
 					bool_text(artifact_valid(artifact_id)),
-					tostring(idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
-					tostring(artifact_id) == tostring(focus_id) and ":focus" or ""
+					tostr(idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
+					tostr(artifact_id) == tostr(focus_id) and ":focus" or ""
 				)
 			end
 		end
@@ -299,13 +300,14 @@ local function artifact_bucket_debug(idx, smart_id, focus_id)
 	return string.format(
 		"smart_bucket smart=%s count=%s available=%s list=[%s]",
 		named_id(smart_id),
-		tostring(count),
+		tostr(count),
 		bool_text(flags and flags.artefact_available == true),
 		#parts > 0 and table.concat(parts, ";") or "-"
 	)
 end
 
 local function artifact_pool_debug(idx)
+	local tostr = tostring
 	if not idx then
 		return "artifact_pool=index_missing"
 	end
@@ -321,10 +323,11 @@ local function artifact_pool_debug(idx)
 			reserved = reserved + 1
 		end
 	end
-	return string.format("artifact_pool total=%s valid=%s reserved=%s revision=%s", tostring(total), tostring(valid), tostring(reserved), tostring(idx.artifact_revision or "-"))
+	return string.format("artifact_pool total=%s valid=%s reserved=%s revision=%s", tostr(total), tostr(valid), tostr(reserved), tostr(idx.artifact_revision or "-"))
 end
 
 local function artifact_object_debug(idx, artifact_id)
+	local tostr = tostring
 	artifact_id = tonumber(artifact_id)
 	if not artifact_id then
 		return "artifact id=-"
@@ -333,26 +336,27 @@ local function artifact_object_debug(idx, artifact_id)
 	local online = online_object_by_id(artifact_id)
 	return string.format(
 		"artifact id=%s section=%s expected_smart=%s zone=%s level=%s reserved_by=%s valid=%s server=%s online=%s parent=%s",
-		tostring(artifact_id),
-		tostring((idx and idx.artifact_section and idx.artifact_section[artifact_id]) or object_section(se_artifact) or object_section(online) or "-"),
+		tostr(artifact_id),
+		tostr((idx and idx.artifact_section and idx.artifact_section[artifact_id]) or object_section(se_artifact) or object_section(online) or "-"),
 		named_id(idx and idx.artifact_smart and idx.artifact_smart[artifact_id] or nil),
-		tostring(idx and idx.artifact_zone and idx.artifact_zone[artifact_id] or "-"),
-		tostring(idx and idx.artifact_level and idx.artifact_level[artifact_id] or "-"),
-		tostring(idx and idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
+		tostr(idx and idx.artifact_zone and idx.artifact_zone[artifact_id] or "-"),
+		tostr(idx and idx.artifact_level and idx.artifact_level[artifact_id] or "-"),
+		tostr(idx and idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
 		bool_text(artifact_valid(artifact_id)),
 		bool_text(se_artifact ~= nil),
 		bool_text(online ~= nil),
-		tostring(se_artifact and se_artifact.parent_id or "-")
+		tostr(se_artifact and se_artifact.parent_id or "-")
 	)
 end
 
 local function debug_artifact_error(squad, reason, artifact_id, npc, extra)
+	local tostr = tostring
 	if type(printf) ~= "function" or not debug_print_enabled() then
 		return
 	end
 	local now = time_global and time_global() or 0
 	local target_id = squad and (tonumber(squad.zhopa2_target) or squad.zhopa2_target) or nil
-	local key = string.format("%s|%s|%s|%s", tostring(reason), tostring(squad and squad.id or "-"), tostring(artifact_id or "-"), tostring(target_id or "-"))
+	local key = string.format("%s|%s|%s|%s", tostr(reason), tostr(squad and squad.id or "-"), tostr(artifact_id or "-"), tostr(target_id or "-"))
 	if squad and squad.zhopa2_artifact_debug_key == key and now > 0 and (now - (tonumber(squad.zhopa2_artifact_debug_time) or 0)) < DEBUG_COOLDOWN_MS then
 		return
 	end
@@ -365,17 +369,17 @@ local function debug_artifact_error(squad, reason, artifact_id, npc, extra)
 	local artifact_smart_id = idx and idx.artifact_smart and idx.artifact_smart[tonumber(artifact_id)] or nil
 	printf(
 		"~ ZHOPA2 artifact error | reason [%s] squad [%s:%s] faction [%s] task_target [%s] current_smart [%s] current_target [%s] assigned_target [%s] npc [%s:%s] extra [%s]",
-		tostring(reason or "-"),
-		tostring(squad and object_name(squad) or "-"),
-		tostring(squad and squad.id or "-"),
-		tostring(squad and squad.player_id or "-"),
+		tostr(reason or "-"),
+		tostr(squad and object_name(squad) or "-"),
+		tostr(squad and squad.id or "-"),
+		tostr(squad and squad.player_id or "-"),
 		named_id(target_id),
 		named_id(squad and squad.smart_id or nil),
 		named_id(squad and squad.current_target_id or nil),
 		named_id(squad and squad.assigned_target_id or nil),
-		tostring(npc and object_name(npc) or "-"),
-		tostring(npc and object_id(npc) or "-"),
-		tostring(extra or "-")
+		tostr(npc and object_name(npc) or "-"),
+		tostr(npc and object_id(npc) or "-"),
+		tostr(extra or "-")
 	)
 	printf("~ ZHOPA2 artifact expected | %s", artifact_object_debug(idx, artifact_id))
 	printf("~ ZHOPA2 artifact smart pool | task_target [%s] artifact_smart [%s] %s", named_id(target_id), named_id(artifact_smart_id), artifact_bucket_debug(idx, target_id or artifact_smart_id, artifact_id))
@@ -741,20 +745,21 @@ local function gather_item_debug_status(npc, artifact_id)
 end
 
 local function pickup_stalled(squad, npc, now)
+	local tonum = tonumber
 	if not (squad and npc and now and now > 0) then
 		return false, nil
 	end
 	local pos = object_position(npc)
-	local x = pos and tonumber(pos.x) or nil
-	local y = pos and tonumber(pos.y) or nil
-	local z = pos and tonumber(pos.z) or nil
+	local x = pos and tonum(pos.x) or nil
+	local y = pos and tonum(pos.y) or nil
+	local z = pos and tonum(pos.z) or nil
 	if not (x and y and z) then
 		return false, nil
 	end
 
-	local last_x = tonumber(squad.zhopa2_artifact_pickup_last_x)
-	local last_y = tonumber(squad.zhopa2_artifact_pickup_last_y)
-	local last_z = tonumber(squad.zhopa2_artifact_pickup_last_z)
+	local last_x = tonum(squad.zhopa2_artifact_pickup_last_x)
+	local last_y = tonum(squad.zhopa2_artifact_pickup_last_y)
+	local last_z = tonum(squad.zhopa2_artifact_pickup_last_z)
 	if not (last_x and last_y and last_z) then
 		squad.zhopa2_artifact_pickup_last_x = x
 		squad.zhopa2_artifact_pickup_last_y = y
@@ -775,7 +780,7 @@ local function pickup_stalled(squad, npc, now)
 		return false, nil
 	end
 
-	local stall_since = tonumber(squad.zhopa2_artifact_pickup_stall_since)
+	local stall_since = tonum(squad.zhopa2_artifact_pickup_stall_since)
 	if not stall_since then
 		squad.zhopa2_artifact_pickup_stall_since = now
 		return false, nil
@@ -970,6 +975,8 @@ function M.release_reservation(squad, reason)
 end
 
 function M.pick_target(squad, opts)
+	local sformat = string.format
+	local tostr = tostring
 	if not runtime_ready("artifact_pick_target") then
 		return nil, "runtime_not_ready"
 	end
@@ -979,7 +986,7 @@ function M.pick_target(squad, opts)
 	local idx = index_mod()
 	local p = perception_mod()
 	if not (idx and type(idx.reserve_artifact_for_squad) == "function" and p and type(p.pick_artifact_target) == "function") then
-		debug_artifact_error(squad, "artifact_pick_deps_missing", current_artifact_id(squad), nil, string.format("index=%s perception=%s", tostring(idx ~= nil), tostring(p ~= nil)))
+		debug_artifact_error(squad, "artifact_pick_deps_missing", current_artifact_id(squad), nil, sformat("index=%s perception=%s", tostr(idx ~= nil), tostr(p ~= nil)))
 		return nil
 	end
 
@@ -1003,7 +1010,7 @@ function M.pick_target(squad, opts)
 				reason = "artefact_reserved",
 			}
 		end
-		debug_artifact_error(squad, "artifact_reserved_smart_missing", reserved_id, nil, string.format("smart_id=%s", tostring(smart_id or "-")))
+		debug_artifact_error(squad, "artifact_reserved_smart_missing", reserved_id, nil, sformat("smart_id=%s", tostr(smart_id or "-")))
 	end
 
 	local entry = p.pick_artifact_target(squad, opts or {})
@@ -1013,14 +1020,14 @@ function M.pick_target(squad, opts)
 	local entry_smart_id = tonumber(object_id(entry.smart))
 	local artifact_smart_id = idx.artifact_smart and tonumber(idx.artifact_smart[entry.artifact_id]) or nil
 	if entry_smart_id and artifact_smart_id and entry_smart_id ~= artifact_smart_id then
-		debug_artifact_error(squad, "artifact_entry_smart_mismatch", entry.artifact_id, nil, string.format("entry_smart=%s artifact_smart=%s", tostring(entry_smart_id), tostring(artifact_smart_id)))
+		debug_artifact_error(squad, "artifact_entry_smart_mismatch", entry.artifact_id, nil, sformat("entry_smart=%s artifact_smart=%s", tostr(entry_smart_id), tostr(artifact_smart_id)))
 		return nil
 	end
 	if artifact_target_blacklisted(squad, entry.smart) then
 		return nil, "artifact_target_blacklisted"
 	end
 	if not idx.reserve_artifact_for_squad(squad, entry.artifact_id) then
-		debug_artifact_error(squad, "artifact_reserve_failed", entry.artifact_id, nil, string.format("smart=%s", tostring(object_id(entry.smart) or "-")))
+		debug_artifact_error(squad, "artifact_reserve_failed", entry.artifact_id, nil, sformat("smart=%s", tostr(object_id(entry.smart) or "-")))
 		return nil
 	end
 	entry.reason = entry.reason or "artefact_available"
@@ -1028,6 +1035,7 @@ function M.pick_target(squad, opts)
 end
 
 function M.offline_collect(squad, artifact_id, reason)
+	local tostr = tostring
 	if not runtime_ready("artifact_offline_collect") then
 		return false, "runtime_not_ready"
 	end
@@ -1052,14 +1060,14 @@ function M.offline_collect(squad, artifact_id, reason)
 	end
 	local same_level, squad_level, artifact_level = artifact_same_level_as_squad(squad, artifact_id)
 	if not same_level then
-		debug_artifact_error(squad, "artifact_offline_wrong_level", artifact_id, nil, string.format("squad_level=%s artifact_level=%s", tostring(squad_level or "-"), tostring(artifact_level or "-")))
+		debug_artifact_error(squad, "artifact_offline_wrong_level", artifact_id, nil, string.format("squad_level=%s artifact_level=%s", tostr(squad_level or "-"), tostr(artifact_level or "-")))
 		return nil, "artifact_offline_wrong_level"
 	end
 
 	local section = object_section(se_artifact)
 	local se_looter = squad_member_server(squad, squad.commander_id and squad:commander_id() or nil)
 	if not (section and se_looter) then
-		debug_artifact_error(squad, "artifact_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-")))
+		debug_artifact_error(squad, "artifact_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-")))
 		return false, "artifact_no_looter"
 	end
 
@@ -1067,7 +1075,7 @@ function M.offline_collect(squad, artifact_id, reason)
 	local se_new = alife_create_item(section, se_looter)
 	local new_id = object_id(se_new)
 	if not (se_new and new_id and alife_object and alife_object(new_id)) then
-		debug_artifact_error(squad, "artifact_create_failed", artifact_id, nil, string.format("section=%s looter=%s new_id=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-"), tostring(new_id or "-")))
+		debug_artifact_error(squad, "artifact_create_failed", artifact_id, nil, string.format("section=%s looter=%s new_id=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-"), tostr(new_id or "-")))
 		return false, "artifact_create_failed"
 	end
 
@@ -1082,6 +1090,7 @@ function M.offline_collect(squad, artifact_id, reason)
 end
 
 function M.offline_collect_virtual(squad, artifact_id, reason)
+	local tostr = tostring
 	if not runtime_ready("artifact_offline_collect_virtual") then
 		return false, "runtime_not_ready"
 	end
@@ -1107,14 +1116,14 @@ function M.offline_collect_virtual(squad, artifact_id, reason)
 	end
 	local same_level, squad_level, artifact_level = artifact_same_level_as_squad(squad, artifact_id)
 	if not same_level then
-		debug_artifact_error(squad, "artifact_virtual_wrong_level", artifact_id, nil, string.format("squad_level=%s artifact_level=%s", tostring(squad_level or "-"), tostring(artifact_level or "-")))
+		debug_artifact_error(squad, "artifact_virtual_wrong_level", artifact_id, nil, string.format("squad_level=%s artifact_level=%s", tostr(squad_level or "-"), tostr(artifact_level or "-")))
 		return nil, "artifact_virtual_wrong_level"
 	end
 
 	local section = virtual.section
 	local se_looter = squad_member_server(squad, squad.commander_id and squad:commander_id() or nil)
 	if not (section and se_looter) then
-		debug_artifact_error(squad, "artifact_virtual_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-")))
+		debug_artifact_error(squad, "artifact_virtual_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-")))
 		return false, "artifact_virtual_no_looter"
 	end
 
@@ -1122,7 +1131,7 @@ function M.offline_collect_virtual(squad, artifact_id, reason)
 	local se_new = alife_create_item(section, se_looter)
 	local new_id = object_id(se_new)
 	if not (se_new and new_id and alife_object and alife_object(new_id)) then
-		debug_artifact_error(squad, "artifact_virtual_create_failed", artifact_id, nil, string.format("section=%s looter=%s new_id=%s", tostring(section), tostring(se_looter and object_id(se_looter) or "-"), tostring(new_id or "-")))
+		debug_artifact_error(squad, "artifact_virtual_create_failed", artifact_id, nil, string.format("section=%s looter=%s new_id=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-"), tostr(new_id or "-")))
 		return false, "artifact_virtual_create_failed"
 	end
 
@@ -1136,6 +1145,8 @@ function M.offline_collect_virtual(squad, artifact_id, reason)
 end
 
 function M.try_collect(squad)
+	local sfind = string.find
+	local tostr = tostring
 	if not runtime_ready("artifact_try_collect") then
 		return nil, "runtime_not_ready"
 	end
@@ -1188,19 +1199,19 @@ function M.try_collect(squad)
 			return nil, squad.zhopa2_last_result
 		elseif pending_reason ~= "no_pending" then
 			local pending_npc = online_object_by_id(squad.zhopa2_artifact_pickup_npc_id)
-			local pending_extra = tostring(pending_reason)
+			local pending_extra = tostr(pending_reason)
 			local gather_debug = gather_item_debug_status(pending_npc, artifact_id)
 			if gather_debug then
-				pending_extra = pending_extra .. " " .. tostring(gather_debug)
+				pending_extra = pending_extra .. " " .. tostr(gather_debug)
 			end
-			if string.find(tostring(pending_reason), "pickup_not_active", 1, true) then
+			if sfind(tostr(pending_reason), "pickup_not_active", 1, true) then
 				if recover_vanilla_artifact_pickup(squad, artifact_id) or squad_has_artifact_cargo(squad, artifact_id) then
 					release_artifact_reservation(squad, "artifact_collected")
 					return true, "artifact_collected"
 				end
 				local idle_failed, idle_reason = online_arrived_idle_timeout(squad, artifact_id, pending_reason, true)
 				if idle_failed then
-					debug_artifact_error(squad, "artifact_online_idle_no_pickup", artifact_id, pending_npc, pending_extra .. " " .. tostring(idle_reason or "-"))
+					debug_artifact_error(squad, "artifact_online_idle_no_pickup", artifact_id, pending_npc, pending_extra .. " " .. tostr(idle_reason or "-"))
 					cancel_online_pickup(squad)
 					clear_online_pickup_state(squad)
 					release_artifact_reservation(squad, "artifact_online_idle_no_pickup")
@@ -1212,11 +1223,11 @@ function M.try_collect(squad)
 			end
 			cancel_online_pickup(squad)
 			clear_online_pickup_state(squad)
-			if string.find(tostring(pending_reason), "pickup_stalled", 1, true) then
+			if sfind(tostr(pending_reason), "pickup_stalled", 1, true) then
 				debug_artifact_error(squad, "artifact_online_pickup_stalled", artifact_id, pending_npc, pending_extra)
 				return false, "artifact_online_pickup_stalled"
 			end
-			if string.find(tostring(pending_reason), "pickup_approach", 1, true) or string.find(tostring(pending_reason), "pickup_no_approach", 1, true) then
+			if sfind(tostr(pending_reason), "pickup_approach", 1, true) or sfind(tostr(pending_reason), "pickup_no_approach", 1, true) then
 				debug_artifact_error(squad, "artifact_online_pickup_unreachable", artifact_id, pending_npc, pending_extra)
 				return false, "artifact_online_pickup_unreachable"
 			end
@@ -1244,7 +1255,7 @@ function M.try_collect(squad)
 				squad.zhopa2_last_result = "artifact_online_pickup_requested"
 				return nil, squad.zhopa2_last_result
 			end
-			request_failures[#request_failures + 1] = string.format("%s:%s", tostring(object_id(npc) or "-"), tostring(request_reason or "-"))
+			request_failures[#request_failures + 1] = string.format("%s:%s", tostr(object_id(npc) or "-"), tostr(request_reason or "-"))
 		end
 		if all_failures_contested(request_failures) then
 			local now = now_ms()
@@ -1263,7 +1274,7 @@ function M.try_collect(squad)
 		return nil, squad.zhopa2_last_result
 	end
 	if squad.online == true and online_reason == "artifact_virtual_offline_only" then
-		debug_artifact_error(squad, "artifact_virtual_online_unmaterialized", artifact_id, nil, tostring(materialize_reason or online_reason))
+		debug_artifact_error(squad, "artifact_virtual_online_unmaterialized", artifact_id, nil, tostr(materialize_reason or online_reason))
 		release_artifact_reservation(squad, "artifact_virtual_online_unmaterialized")
 		squad.zhopa2_last_result = "artifact_virtual_online_unmaterialized"
 		return false, squad.zhopa2_last_result
@@ -1275,7 +1286,7 @@ function M.try_collect(squad)
 		end
 		local idle_failed, idle_reason = online_arrived_idle_timeout(squad, artifact_id, online_reason)
 		if idle_failed then
-			debug_artifact_error(squad, "artifact_online_missing", artifact_id, nil, tostring(idle_reason or online_reason))
+			debug_artifact_error(squad, "artifact_online_missing", artifact_id, nil, tostr(idle_reason or online_reason))
 			clear_online_pickup_state(squad)
 			release_artifact_reservation(squad, "artifact_online_missing")
 			squad.zhopa2_last_result = "artifact_online_missing"
@@ -1285,7 +1296,7 @@ function M.try_collect(squad)
 		return nil, squad.zhopa2_last_result
 	end
 
-	return M.offline_collect(squad, artifact_id, "artifact_offline_collect:" .. tostring(online_reason or "offline"))
+	return M.offline_collect(squad, artifact_id, "artifact_offline_collect:" .. tostr(online_reason or "offline"))
 end
 
 function M.complete(squad, reason)
