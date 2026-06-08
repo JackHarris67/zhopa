@@ -11,6 +11,7 @@ M.TASK_ARTEFACT = "ARTEFACT"
 M.TASK_TRADE = "TRADE"
 M.TASK_HUNT = "HUNT"
 M.TASK_REVENGE = "REVENGE"
+M.TASK_STORY_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
 
 local ACTOR_TARGET_ID = AC_ID or 0
 local REVENGE_GOODWILL = -3000
@@ -90,6 +91,15 @@ local function economy_mod()
 	if not mod and require then
 		pcall(require, "zhopa2_economy")
 		mod = rawget(_G, "zhopa2_economy")
+	end
+	return mod
+end
+
+local function story_north_mod()
+	local mod = rawget(_G, "zhopa2_story_north_migration")
+	if not mod and require then
+		pcall(require, "zhopa2_story_north_migration")
+		mod = rawget(_G, "zhopa2_story_north_migration")
 	end
 	return mod
 end
@@ -1467,6 +1477,7 @@ function M.assign_base_camping_permanent(squad, smart, reason)
 		[M.TASK_BASE_CAMPING] = true,
 		[M.TASK_NIGHT_REST] = true,
 		[M.TASK_FORCE_EXIT] = true,
+		[M.TASK_STORY_NORTH_MIGRATION] = true,
 	}
 	local assign_reason = reason or "base_camping_empty_base"
 	return M.interrupt_task(squad, M.TASK_BASE_CAMPING, smart.id, 0, assign_reason, nil, {
@@ -2080,6 +2091,12 @@ function M.update_squad(squad, memory)
 			squad:zhopa2_clear_task("target_blacklisted")
 		end
 		assign_rest(squad, blacklist_reason or "target_blacklisted")
+		update_debug(squad)
+		return true
+	end
+
+	local north = story_north_mod()
+	if north and type(north.update_squad_tasks) == "function" and north.update_squad_tasks(squad, { prevalidated = true }) == true then
 		update_debug(squad)
 		return true
 	end

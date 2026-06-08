@@ -1,0 +1,1239 @@
+local M = {}
+
+local STATE_KEY = "zhopa2_story_north_migration"
+local STATE_VERSION = 1
+local TASK_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
+local INVALID_ID = 65535
+local RECHECK_MS = 1000
+local DISTANCE_FALLBACK = 1000000000
+local ENEMIES_THRESHOLD = tonumber(_G.game_relations and _G.game_relations.ENEMIES) or -1000
+
+local NORTH_LEVELS = {
+	"zaton",
+	"jupiter",
+	"pripyat",
+}
+
+local NORTH_LEVEL_SET = {
+	zaton = true,
+	jupiter = true,
+	pripyat = true,
+}
+
+local EXCLUDED_FACTIONS = {
+	monolith = true,
+	greh = true,
+	isg = true,
+}
+
+local relation_aliases = {
+	duty = "dolg",
+	merc = "killer",
+	mutant = "monster",
+	mutants = "monster",
+	monster_predatory = "monster",
+	monster_predatory_day = "monster",
+	monster_predatory_night = "monster",
+	monster_vegetarian = "monster",
+	monster_special = "monster",
+	monster_zombied = "zombied",
+	monster_zombied_day = "zombied",
+	monster_zombied_night = "zombied",
+}
+
+local state = {
+	fired = false,
+	legacy_skipped = false,
+	selected_by_sid = {},
+	status_by_sid = {},
+	retargeted_by_sid = {},
+}
+
+local callbacks_registered = false
+local pending_reconcile = false
+local pending_source = nil
+local next_recheck_tg = 0
+local rollout_running = false
+
+local function load_module(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg_mod()
+	return load_module("zhopa2_cfg")
+end
+
+local function index_mod()
+	return load_module("zhopa2_index")
+end
+
+local function perception_mod()
+	return load_module("zhopa2_perception")
+end
+
+local function topology_mod()
+	return load_module("zhopa2_topology")
+end
+
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_num) == "function" then
+		return tonumber(cfg.get_num(key, default)) or default
+	end
+	return default
+end
+
+local function debug_enabled()
+	return cfg_bool("debug_hud_enabled", false) == true
+end
+
+local function debug_log(fmt, ...)
+	if type(printf) == "function" and debug_enabled() then
+		pcall(printf, fmt, ...)
+	end
+end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+local function normalize_id(value)
+	local id = tonumber(value)
+	if not id or id <= 0 or id == INVALID_ID then
+		return nil
+	end
+	return id
+end
+
+local function normalize_status(value)
+	if type(value) ~= "string" then
+		return "pending"
+	end
+	value = string.lower(value)
+	if value == "travel" or value == "done" or value == "dead_or_invalid" then
+		return value
+	end
+	return "pending"
+end
+
+local function normalize_sid_set(src)
+	local out = {}
+	if type(src) ~= "table" then
+		return out
+	end
+	for k, v in pairs(src) do
+		local sid = normalize_id(k)
+		if sid and v ~= false and v ~= nil then
+			out[sid] = true
+		elseif sid == nil then
+			sid = normalize_id(v)
+			if sid then
+				out[sid] = true
+			end
+		end
+	end
+	return out
+end
+
+local function normalize_status_map(src)
+	local out = {}
+	if type(src) ~= "table" then
+		return out
+	end
+	for k, v in pairs(src) do
+		local sid = normalize_id(k)
+		if sid then
+			out[sid] = normalize_status(v)
+		end
+	end
+	return out
+end
+
+local function event_state()
+	if type(state) ~= "table" then
+		state = {}
+	end
+	state.selected_by_sid = type(state.selected_by_sid) == "table" and state.selected_by_sid or {}
+	state.status_by_sid = type(state.status_by_sid) == "table" and state.status_by_sid or {}
+	state.retargeted_by_sid = type(state.retargeted_by_sid) == "table" and state.retargeted_by_sid or {}
+	state.fired = state.fired == true
+	state.legacy_skipped = state.legacy_skipped == true
+	return state
+end
+
+local function resolve_object(id)
+	id = normalize_id(id)
+	if not id then
+		return nil
+	end
+	if type(alife_object) == "function" then
+		local ok, obj = pcall(alife_object, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	local sim = nil
+	if type(alife) == "function" then
+		local ok_sim, value = pcall(alife)
+		sim = ok_sim and value or nil
+	end
+	if sim and type(sim.object) == "function" then
+		local ok, obj = pcall(sim.object, sim, id)
+		if ok then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function object_level(obj)
+	local p = perception_mod()
+	if p and type(p.obj_level) == "function" then
+		local ok, level_name = pcall(p.obj_level, obj)
+		if ok and type(level_name) == "string" and level_name ~= "" then
+			return level_name
+		end
+	end
+	if not (obj and obj.m_game_vertex_id and type(game_graph) == "function" and type(alife) == "function") then
+		return nil
+	end
+	local ok_gg, gg = pcall(game_graph)
+	local ok_sim, sim = pcall(alife)
+	if not (ok_gg and ok_sim and gg and sim and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	local ok_vertex, vertex = pcall(gg.vertex, gg, obj.m_game_vertex_id)
+	if not (ok_vertex and vertex) then
+		return nil
+	end
+	local ok_level_id, level_id = pcall(vertex.level_id, vertex)
+	if not ok_level_id then
+		return nil
+	end
+	local ok_level_name, level_name = pcall(sim.level_name, sim, level_id)
+	return ok_level_name and level_name or nil
+end
+
+local function safe_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.name) == "function" then
+		local ok, name = pcall(obj.name, obj)
+		if ok and name then
+			return name
+		end
+	end
+	return obj.name
+end
+
+local function squad_section_name(squad)
+	if not squad then
+		return nil
+	end
+	if squad.zhopa2_section_name ~= nil then
+		return squad.zhopa2_section_name
+	end
+	if type(squad.section_name) ~= "function" then
+		return nil
+	end
+	local ok, section = pcall(squad.section_name, squad)
+	if ok and section then
+		squad.zhopa2_section_name = section
+		return section
+	end
+	return nil
+end
+
+local function squad_npc_count(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return 0
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) or 0
+end
+
+local function normalize_faction(value)
+	if value == nil then
+		return nil
+	end
+	value = string.lower(tostring(value))
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_faction_alias) == "function" then
+		local alias = cfg.get_faction_alias(value)
+		if alias then
+			value = string.lower(tostring(alias))
+		end
+	end
+	return value ~= "" and value or nil
+end
+
+local function squad_faction(squad)
+	local p = perception_mod()
+	if p and type(p.squad_player_id) == "function" then
+		local ok, value = pcall(p.squad_player_id, squad)
+		if ok and value then
+			return normalize_faction(value)
+		end
+	end
+	return normalize_faction(squad and squad.player_id)
+end
+
+local function relation_faction(value)
+	value = normalize_faction(value)
+	return value and (relation_aliases[value] or value) or nil
+end
+
+local function relation_allows_coexist(source_faction, other_faction)
+	local source_key = relation_faction(source_faction)
+	local other_key = relation_faction(other_faction)
+	if not (source_key and other_key) then
+		return false
+	end
+	if source_key == other_key then
+		return true
+	end
+	if game_relations and type(game_relations.get_factions_community) == "function" then
+		local ok, relation = pcall(game_relations.get_factions_community, source_key, other_key)
+		relation = ok and tonumber(relation) or nil
+		if relation ~= nil then
+			return relation > ENEMIES_THRESHOLD
+		end
+	end
+	return false
+end
+
+local function is_story_mode_active()
+	local fn = rawget(_G, "IsStoryMode")
+	if type(fn) == "function" then
+		local ok, value = pcall(fn)
+		if ok then
+			return value == true
+		end
+	end
+	if type(has_alife_info) == "function" then
+		local ok, value = pcall(has_alife_info, "story_mode_disabled")
+		if ok then
+			return value ~= true
+		end
+	end
+	local actor = db and db.actor or nil
+	if actor and type(actor.has_info) == "function" then
+		local ok, value = pcall(actor.has_info, actor, "story_mode_disabled")
+		if ok then
+			return value ~= true
+		end
+	end
+	return true
+end
+
+local function has_info(info)
+	if type(info) ~= "string" or info == "" then
+		return false
+	end
+	if type(has_alife_info) == "function" then
+		local ok, value = pcall(has_alife_info, info)
+		if ok then
+			return value == true
+		end
+	end
+	local actor = db and db.actor or nil
+	if actor and type(actor.has_info) == "function" then
+		local ok, value = pcall(actor.has_info, actor, info)
+		if ok then
+			return value == true
+		end
+	end
+	return false
+end
+
+local function trigger_active()
+	return is_story_mode_active() == true and has_info("bar_deactivate_radar_done") == true
+end
+
+local function feature_enabled_now()
+	return cfg_bool("enabled", true) == true
+		and cfg_bool("story_north_migration_enabled", true) == true
+		and is_story_mode_active() == true
+end
+
+local function percent_value()
+	local value = cfg_num("story_north_migration_percent", 50)
+	if value < 0 then
+		return 0
+	elseif value > 100 then
+		return 100
+	end
+	return value
+end
+
+local function is_monster_squad(squad)
+	local p = perception_mod()
+	if p and type(p.is_monster_squad) == "function" then
+		local ok, result = pcall(p.is_monster_squad, squad)
+		return ok and result == true
+	end
+	return false
+end
+
+local function squad_can_manage(squad)
+	if not squad then
+		return false
+	end
+	if type(squad.zhopa2_can_manage) == "function" then
+		local ok, result = pcall(squad.zhopa2_can_manage, squad)
+		if not (ok and result == true) then
+			return false
+		end
+	elseif squad.disabled or squad.player_id == "actor" then
+		return false
+	end
+	return squad_npc_count(squad) > 0
+end
+
+local function is_ap_owned_squad(squad)
+	local bridge = rawget(_G, "zhopa2_ap_bridge")
+	if bridge and type(bridge.is_ap_owned_squad) == "function" then
+		local ok, result = pcall(bridge.is_ap_owned_squad, squad)
+		return ok and result == true
+	end
+	return false
+end
+
+local function is_plain_stalker_sim_squad(squad)
+	if is_monster_squad(squad) then
+		return false
+	end
+	local section = squad_section_name(squad)
+	return type(section) == "string"
+		and string.find(section, "_sim_squad_", 1, true) ~= nil
+		and string.find(section, "_sim_squad_service_", 1, true) == nil
+		and string.find(section, "_sim_squad_dead", 1, true) == nil
+end
+
+local function eligible_squad(squad)
+	if not (squad_can_manage(squad) and is_plain_stalker_sim_squad(squad)) then
+		return false
+	end
+	local faction = squad_faction(squad)
+	if not faction or EXCLUDED_FACTIONS[faction] == true then
+		return false
+	end
+	if is_ap_owned_squad(squad) then
+		return false
+	end
+	return true
+end
+
+local function smart_by_id(smart_id)
+	local id = normalize_id(smart_id)
+	if not id then
+		return nil
+	end
+	local board = rawget(_G, "SIMBOARD")
+	local stored = board and board.smarts and board.smarts[id] or nil
+	if type(stored) == "table" and stored.smrt then
+		return stored.smrt
+	end
+	return stored or resolve_object(id)
+end
+
+local function target_validation_opts(kind)
+	return {
+		level_mode = "any",
+		kind = kind,
+		ignore_population = true,
+		skip_prior = true,
+		safe_rest = true,
+		skip_props = true,
+	}
+end
+
+local function collect_target_factions(smart)
+	local out = {}
+	local seen = {}
+	local board_smart = smart and rawget(_G, "SIMBOARD") and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
+	if board_smart and board_smart.squads then
+		for sid in pairs(board_smart.squads) do
+			local other = resolve_object(sid)
+			local faction = squad_faction(other)
+			if faction and seen[faction] ~= true then
+				seen[faction] = true
+				out[#out + 1] = faction
+			end
+		end
+	end
+	local event = event_state()
+	for sid in pairs(event.selected_by_sid) do
+		local status = normalize_status(event.status_by_sid[sid])
+		if status ~= "done" and status ~= "dead_or_invalid" then
+			local other = resolve_object(sid)
+			if other and other.zhopa2_task == TASK_NORTH_MIGRATION and tonumber(other.zhopa2_target) == tonumber(smart and smart.id) then
+				local faction = squad_faction(other)
+				if faction and seen[faction] ~= true then
+					seen[faction] = true
+					out[#out + 1] = faction
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function target_safe_for_squad(squad, smart, expected_level, kind)
+	if not (squad and smart and smart.id and expected_level) then
+		return false, "invalid_target"
+	end
+	if object_level(smart) ~= expected_level then
+		return false, "wrong_level"
+	end
+	local p = perception_mod()
+	if p and type(p.valid_smart) == "function" then
+		local ok, valid = pcall(p.valid_smart, squad, smart, target_validation_opts(kind))
+		if not (ok and valid == true) then
+			return false, "valid_smart"
+		end
+	end
+	local faction = squad_faction(squad)
+	local occupants = collect_target_factions(smart)
+	for i = 1, #occupants do
+		if relation_allows_coexist(faction, occupants[i]) ~= true then
+			return false, "relation:" .. tostring(occupants[i])
+		end
+	end
+	return true
+end
+
+local function game_graph_distance(a, b)
+	local ag = tonumber(a and a.m_game_vertex_id)
+	local bg = tonumber(b and b.m_game_vertex_id)
+	if ag and bg and game_graph then
+		local ok, distance = pcall(function()
+			return game_graph():distance(ag, bg)
+		end)
+		if ok and tonumber(distance) then
+			return tonumber(distance)
+		end
+	end
+	if a and b and a.position and b.position then
+		local ok, distance = pcall(function()
+			return a.position:distance_to(b.position)
+		end)
+		if ok and tonumber(distance) then
+			return tonumber(distance)
+		end
+	end
+	return DISTANCE_FALLBACK
+end
+
+local function pick_random(list)
+	if type(list) ~= "table" or #list <= 0 then
+		return nil
+	end
+	return list[math.random(#list)]
+end
+
+local function shuffle_in_place(list)
+	if type(list) ~= "table" then
+		return list
+	end
+	for i = #list, 2, -1 do
+		local j = math.random(i)
+		if j ~= i then
+			list[i], list[j] = list[j], list[i]
+		end
+	end
+	return list
+end
+
+local function smarts_on_level(level_name, kind)
+	local idx = index_mod()
+	if not (idx and type(idx.smarts_on_levels) == "function") then
+		return {}
+	end
+	return idx.smarts_on_levels({ level_name }, nil, kind) or {}
+end
+
+local function base_smarts_on_level(level_name)
+	local idx = index_mod()
+	if idx and type(idx.base_smarts_on_levels) == "function" then
+		return idx.base_smarts_on_levels({ level_name }) or {}
+	end
+	return smarts_on_level(level_name, "base")
+end
+
+local function projected_load(level_name, exclude_sid)
+	local event = event_state()
+	local load = 0
+	for sid in pairs(event.selected_by_sid) do
+		if sid ~= exclude_sid and normalize_status(event.status_by_sid[sid]) ~= "dead_or_invalid" then
+			local squad = resolve_object(sid)
+			local target = squad and smart_by_id(squad.zhopa2_target) or nil
+			local target_level = target and object_level(target) or object_level(squad)
+			if target_level == level_name then
+				load = load + 1
+			end
+		end
+	end
+	return load
+end
+
+local function ordered_north_levels(squad)
+	local scored = {}
+	local sid = normalize_id(squad and squad.id)
+	for i = 1, #NORTH_LEVELS do
+		local level_name = NORTH_LEVELS[i]
+		local bases = base_smarts_on_level(level_name)
+		local best = DISTANCE_FALLBACK
+		for j = 1, #bases do
+			local smart = bases[j]
+			local dist = game_graph_distance(squad, smart)
+			if dist < best then
+				best = dist
+			end
+		end
+		scored[#scored + 1] = {
+			level = level_name,
+			load = projected_load(level_name, sid),
+			distance = best,
+			order = i,
+		}
+	end
+	table.sort(scored, function(a, b)
+		if a.load ~= b.load then
+			return a.load < b.load
+		end
+		if a.distance ~= b.distance then
+			return a.distance < b.distance
+		end
+		return a.order < b.order
+	end)
+	local out = {}
+	for i = 1, #scored do
+		out[i] = scored[i].level
+	end
+	return out
+end
+
+local function nearest_safe_from_list(squad, level_name, list, kind)
+	local best
+	local best_dist
+	local fallback = {}
+	for i = 1, #(list or {}) do
+		local smart = list[i]
+		local safe = target_safe_for_squad(squad, smart, level_name, kind)
+		if safe == true then
+			local dist = game_graph_distance(squad, smart)
+			if dist < DISTANCE_FALLBACK then
+				if not best_dist or dist < best_dist then
+					best = smart
+					best_dist = dist
+				end
+			else
+				fallback[#fallback + 1] = smart
+			end
+		end
+	end
+	return best or pick_random(fallback)
+end
+
+local function safe_random_smart(squad, level_name)
+	local smarts = smarts_on_level(level_name)
+	local safe = {}
+	for i = 1, #(smarts or {}) do
+		local smart = smarts[i]
+		if target_safe_for_squad(squad, smart, level_name) == true then
+			safe[#safe + 1] = smart
+		end
+	end
+	return pick_random(safe)
+end
+
+local function pick_safe_target_on_level(squad, level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return nil
+	end
+	local base = nearest_safe_from_list(squad, level_name, base_smarts_on_level(level_name), "base")
+	if base then
+		return base
+	end
+	local rest = nearest_safe_from_list(squad, level_name, smarts_on_level(level_name), "rest")
+	if rest then
+		return rest
+	end
+	return safe_random_smart(squad, level_name)
+end
+
+local function neighbor_levels(level_name)
+	local topo = topology_mod()
+	if topo and type(topo.get_level_neighbors) == "function" then
+		local ok, res = pcall(topo.get_level_neighbors, level_name)
+		if ok and type(res) == "table" then
+			return res
+		end
+	end
+	return {}
+end
+
+local function pick_north_target(squad)
+	local searched = {}
+	local ordered = ordered_north_levels(squad)
+	for i = 1, #ordered do
+		local level_name = ordered[i]
+		if searched[level_name] ~= true then
+			searched[level_name] = true
+			local smart = pick_safe_target_on_level(squad, level_name)
+			if smart then
+				return smart, level_name
+			end
+		end
+		local neighbors = neighbor_levels(level_name)
+		for j = 1, #neighbors do
+			local neighbor = neighbors[j]
+			if searched[neighbor] ~= true then
+				searched[neighbor] = true
+				local smart = pick_safe_target_on_level(squad, neighbor)
+				if smart then
+					return smart, neighbor
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+local function story_task_active(squad)
+	return squad and squad.zhopa2_task == TASK_NORTH_MIGRATION
+end
+
+local function set_status(sid, status)
+	sid = normalize_id(sid)
+	if sid then
+		event_state().status_by_sid[sid] = normalize_status(status)
+	end
+end
+
+function M.is_story_task(task)
+	return task == TASK_NORTH_MIGRATION
+		or (type(task) == "table" and task.type == TASK_NORTH_MIGRATION)
+end
+
+function M.is_sid_selected(sid)
+	sid = normalize_id(sid)
+	return sid ~= nil and event_state().selected_by_sid[sid] == true
+end
+
+function M.is_sid_locked(sid)
+	sid = normalize_id(sid)
+	if not (sid and M.is_sid_selected(sid) and feature_enabled_now()) then
+		return false
+	end
+	local status = normalize_status(event_state().status_by_sid[sid])
+	return status ~= "done" and status ~= "dead_or_invalid"
+end
+
+local function save_state(m_data)
+	if type(m_data) ~= "table" then
+		return
+	end
+	local event = event_state()
+	m_data[STATE_KEY] = {
+		version = STATE_VERSION,
+		fired = event.fired == true,
+		legacy_skipped = event.legacy_skipped == true,
+		selected_by_sid = normalize_sid_set(event.selected_by_sid),
+		status_by_sid = normalize_status_map(event.status_by_sid),
+		retargeted_by_sid = normalize_sid_set(event.retargeted_by_sid),
+	}
+end
+
+local function load_state(m_data)
+	local blob = type(m_data) == "table" and m_data[STATE_KEY] or nil
+	if type(blob) == "table" then
+		state = {
+			fired = blob.fired == true,
+			legacy_skipped = blob.legacy_skipped == true,
+			selected_by_sid = normalize_sid_set(blob.selected_by_sid),
+			status_by_sid = normalize_status_map(blob.status_by_sid),
+			retargeted_by_sid = normalize_sid_set(blob.retargeted_by_sid),
+		}
+	elseif trigger_active() then
+		state = {
+			fired = true,
+			legacy_skipped = true,
+			selected_by_sid = {},
+			status_by_sid = {},
+			retargeted_by_sid = {},
+		}
+		debug_log("~ ZHOPA2 north migration | legacy_skipped reason [trigger_already_done_no_state]")
+	else
+		state = {
+			fired = false,
+			legacy_skipped = false,
+			selected_by_sid = {},
+			status_by_sid = {},
+			retargeted_by_sid = {},
+		}
+	end
+	pending_reconcile = true
+	pending_source = "load_state"
+end
+
+local function clear_story_task(squad, reason)
+	if story_task_active(squad) and type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task(reason or "story_north_clear")
+		return true
+	end
+	return false
+end
+
+local function assign_rest(squad, reason)
+	if not squad then
+		return false
+	end
+	clear_story_task(squad, reason or "story_north_done")
+	if type(squad.zhopa2_assign_rest) == "function" then
+		squad:zhopa2_assign_rest(reason or "story_north_done")
+		return true
+	end
+	return false
+end
+
+local function sync_live_target(squad)
+	if not story_task_active(squad) then
+		return
+	end
+	local target = normalize_id(squad.zhopa2_target)
+	if not target then
+		return
+	end
+	if tonumber(squad.scripted_target) ~= target then
+		squad.scripted_target = target
+		squad.assigned_target_id = nil
+		squad.current_target_id = nil
+		squad.current_action = 0
+	end
+end
+
+local function story_arrived(squad, smart)
+	if not (squad and smart) then
+		return false
+	end
+	if type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target() then
+		return true
+	end
+	if smart.am_i_reached then
+		local ok, reached = pcall(smart.am_i_reached, smart, squad)
+		if ok and reached == true then
+			return true
+		end
+	end
+	local sg = tonumber(squad.m_game_vertex_id)
+	local tg = tonumber(smart.m_game_vertex_id)
+	if sg and tg and sg == tg then
+		return true
+	end
+	if squad.position and smart.position then
+		local ok, dist_sqr = pcall(function()
+			return squad.position:distance_to_sqr(smart.position)
+		end)
+		local arrive = tonumber(smart.arrive_dist) or 5
+		if arrive > 5 then
+			arrive = 5
+		end
+		return ok and tonumber(dist_sqr) and tonumber(dist_sqr) <= arrive * arrive
+	end
+	return false
+end
+
+local function assign_story_target(squad, sid, smart, level_name, source)
+	if not (squad and smart and smart.id and type(squad.zhopa2_assign_task) == "function") then
+		return false
+	end
+	if squad:zhopa2_assign_task(TASK_NORTH_MIGRATION, smart.id, 0, source or "story_north_migration") == false then
+		return false
+	end
+	set_status(sid, "travel")
+	squad.zhopa2_last_result = "story_north_migration"
+	debug_log(
+		"~ ZHOPA2 north migration | assign squad [%s:%s] faction [%s] target [%s:%s] level [%s] source [%s]",
+		tostring(safe_name(squad) or "-"),
+		tostring(sid or "-"),
+		tostring(squad_faction(squad) or "-"),
+		tostring(safe_name(smart) or "-"),
+		tostring(smart.id or "-"),
+		tostring(level_name or "-"),
+		tostring(source or "-")
+	)
+	return true
+end
+
+local function retarget_story_task(squad, sid, current_target, reason)
+	local event = event_state()
+	if event.retargeted_by_sid[sid] == true then
+		clear_story_task(squad, reason or "story_north_target_unsafe")
+		set_status(sid, "pending")
+		squad.zhopa2_last_result = "story_north_target_unsafe"
+		return false
+	end
+	local smart, level_name = pick_north_target(squad)
+	if not smart then
+		clear_story_task(squad, reason or "story_north_no_target")
+		set_status(sid, "pending")
+		squad.zhopa2_last_result = "story_north_no_target"
+		return false
+	end
+	event.retargeted_by_sid[sid] = true
+	if assign_story_target(squad, sid, smart, level_name, "story_north_retarget") then
+		debug_log(
+			"~ ZHOPA2 north migration | retarget squad [%s:%s] from [%s] to [%s:%s] level [%s] reason [%s]",
+			tostring(safe_name(squad) or "-"),
+			tostring(sid or "-"),
+			tostring(current_target or "-"),
+			tostring(safe_name(smart) or "-"),
+			tostring(smart.id or "-"),
+			tostring(level_name or "-"),
+			tostring(reason or "-")
+		)
+		return true
+	end
+	set_status(sid, "pending")
+	return false
+end
+
+local function activate_selected_sid(sid, source, squad)
+	sid = normalize_id(sid)
+	if not (sid and M.is_sid_selected(sid)) then
+		return false
+	end
+	local event = event_state()
+	local status = normalize_status(event.status_by_sid[sid])
+	if status == "done" or status == "dead_or_invalid" then
+		clear_story_task(squad, "story_north_terminal")
+		return false
+	end
+	squad = squad or resolve_object(sid)
+	if not squad then
+		set_status(sid, "pending")
+		return false
+	end
+	if not eligible_squad(squad) then
+		clear_story_task(squad, "story_north_no_longer_eligible")
+		set_status(sid, "dead_or_invalid")
+		return false
+	end
+
+	if story_task_active(squad) then
+		local smart = smart_by_id(squad.zhopa2_target)
+		local target_level = object_level(smart)
+		local safe = target_safe_for_squad(squad, smart, target_level)
+		if safe == true then
+			if story_arrived(squad, smart) then
+				set_status(sid, "done")
+				event.retargeted_by_sid[sid] = nil
+				local rest_ok = assign_rest(squad, "story_north_arrived")
+				debug_log(
+					"~ ZHOPA2 north migration | arrived squad [%s:%s] target [%s:%s] level [%s] rest [%s]",
+					tostring(safe_name(squad) or "-"),
+					tostring(sid or "-"),
+					tostring(safe_name(smart) or "-"),
+					tostring(smart and smart.id or "-"),
+					tostring(target_level or "-"),
+					tostring(rest_ok == true)
+				)
+				return true
+			end
+			set_status(sid, "travel")
+			sync_live_target(squad)
+			return true
+		end
+		return retarget_story_task(squad, sid, squad.zhopa2_target, "unsafe_target")
+	end
+
+	local smart, level_name = pick_north_target(squad)
+	if not smart then
+		set_status(sid, "pending")
+		squad.zhopa2_last_result = "story_north_no_target"
+		return true
+	end
+	return assign_story_target(squad, sid, smart, level_name, source or "story_north_assign")
+end
+
+local function collect_eligible_sids()
+	local idx = index_mod()
+	if not (idx and type(idx.squads_on_levels) == "function") then
+		return {}
+	end
+	local levels = {}
+	if type(idx.squad_level_names) == "function" then
+		levels = idx.squad_level_names() or {}
+	end
+	local squads = idx.squads_on_levels(levels)
+	local out = {}
+	local seen = {}
+	for i = 1, #(squads or {}) do
+		local squad = squads[i]
+		local sid = normalize_id(squad and squad.id)
+		if sid and not seen[sid] and eligible_squad(squad) then
+			seen[sid] = true
+			out[#out + 1] = sid
+		end
+	end
+	return out
+end
+
+local function maybe_fire(source)
+	local event = event_state()
+	if event.fired == true or rollout_running == true then
+		return false
+	end
+	if feature_enabled_now() ~= true or trigger_active() ~= true then
+		return false
+	end
+	if not runtime_ready("story_north_fire") then
+		pending_reconcile = true
+		pending_source = source or "runtime_not_ready"
+		return false
+	end
+	rollout_running = true
+	event.fired = true
+	event.legacy_skipped = false
+	local eligible = collect_eligible_sids()
+	shuffle_in_place(eligible)
+	local percent = percent_value()
+	local selected_count = math.floor(#eligible * (percent / 100))
+	if selected_count < 0 then
+		selected_count = 0
+	end
+	for i = 1, selected_count do
+		local sid = normalize_id(eligible[i])
+		if sid then
+			event.selected_by_sid[sid] = true
+			event.status_by_sid[sid] = "pending"
+		end
+	end
+	debug_log(
+		"~ ZHOPA2 north migration | fire source [%s] eligible [%s] selected [%s] percent [%s]",
+		tostring(source or "-"),
+		tostring(#eligible),
+		tostring(selected_count),
+		tostring(percent)
+	)
+	for i = 1, selected_count do
+		activate_selected_sid(eligible[i], "story_north_rollout")
+	end
+	rollout_running = false
+	return true
+end
+
+local function reconcile_selected(source)
+	if not runtime_ready("story_north_reconcile") then
+		pending_reconcile = true
+		pending_source = source or pending_source or "runtime_not_ready"
+		return false
+	end
+	local event = event_state()
+	for sid in pairs(event.selected_by_sid) do
+		local status = normalize_status(event.status_by_sid[sid])
+		if status ~= "done" and status ~= "dead_or_invalid" then
+			local squad = resolve_object(sid)
+			if not squad then
+				event.status_by_sid[sid] = (source == "load_state" or source == "actor_on_first_update") and "pending" or "dead_or_invalid"
+			elseif story_task_active(squad) then
+				event.status_by_sid[sid] = "travel"
+			elseif not eligible_squad(squad) then
+				event.status_by_sid[sid] = "dead_or_invalid"
+			end
+		end
+	end
+	pending_reconcile = false
+	debug_log("~ ZHOPA2 north migration | recover source [%s] selected [%s]", tostring(source or "-"), tostring(next(event.selected_by_sid) ~= nil))
+	return true
+end
+
+function M.update_squad_tasks(squad, ctx)
+	local sid = normalize_id(squad and squad.id)
+	if not sid then
+		return false
+	end
+	if feature_enabled_now() ~= true then
+		clear_story_task(squad, "story_north_disabled")
+		return false
+	end
+	maybe_fire("squad_update")
+	if story_task_active(squad) and M.is_sid_selected(sid) ~= true then
+		event_state().selected_by_sid[sid] = true
+		event_state().status_by_sid[sid] = "travel"
+		debug_log("~ ZHOPA2 north migration | recover squad [%s:%s] source [current_task]", tostring(safe_name(squad) or "-"), tostring(sid))
+	end
+	if M.is_sid_selected(sid) ~= true then
+		return false
+	end
+	activate_selected_sid(sid, ctx and ctx.source or "squad_update", squad)
+	return M.is_sid_locked(sid)
+end
+
+function M.debug_status_line(squad)
+	local sid = normalize_id(squad and squad.id)
+	local status = sid and normalize_status(event_state().status_by_sid[sid]) or "pending"
+	local target = smart_by_id(squad and squad.zhopa2_target)
+	local target_level = object_level(target)
+	return string.format("story: north status=%s target_level=%s", tostring(status or "-"), tostring(target_level or "-"))
+end
+
+function M.ensure_runtime_ready(force_callbacks)
+	if force_callbacks == true and callbacks_registered ~= true then
+		M.on_game_start()
+	end
+	return runtime_ready("story_north_ready")
+end
+
+local function request_reconcile(source)
+	pending_reconcile = true
+	pending_source = source or pending_source or "request"
+	if runtime_ready("story_north_request") then
+		maybe_fire(source or "request")
+		return reconcile_selected(source or "request")
+	end
+	return false
+end
+
+local function actor_on_update()
+	local now = now_ms()
+	if now > 0 and now < next_recheck_tg then
+		return
+	end
+	next_recheck_tg = now > 0 and now + RECHECK_MS or 0
+	if pending_reconcile == true then
+		request_reconcile(pending_source or "actor_on_update")
+	elseif event_state().fired ~= true and trigger_active() == true then
+		maybe_fire("actor_on_update")
+	end
+end
+
+local function actor_on_first_update()
+	request_reconcile("actor_on_first_update")
+end
+
+local function on_game_load()
+	request_reconcile("on_game_load")
+end
+
+local function on_option_change()
+	request_reconcile("on_option_change")
+end
+
+local function server_entity_on_unregister(se_obj, type_name)
+	if type_name ~= "sim_squad_scripted" then
+		return
+	end
+	local sid = normalize_id(se_obj and se_obj.id)
+	if sid and M.is_sid_selected(sid) and normalize_status(event_state().status_by_sid[sid]) ~= "done" then
+		set_status(sid, "pending")
+	end
+end
+
+local function server_entity_on_register(se_obj, type_name)
+	if type_name ~= "sim_squad_scripted" then
+		return
+	end
+	local sid = normalize_id(se_obj and se_obj.id)
+	if sid and M.is_sid_selected(sid) then
+		pending_reconcile = true
+		pending_source = "server_entity_on_register"
+	end
+end
+
+local function squad_on_after_level_change(squad)
+	local sid = normalize_id(squad and squad.id)
+	if sid and M.is_sid_selected(sid) then
+		pending_reconcile = true
+		pending_source = "squad_on_after_level_change"
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		callbacks_registered = false
+		debug_log("~ ZHOPA2 north migration error | init_error reason [missing_RegisterScriptCallback]")
+		return false
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "on_option_change", on_option_change)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
+		pcall(UnregisterScriptCallback, "squad_on_after_level_change", squad_on_after_level_change)
+	end
+	local function reg(name, fn)
+		local ok, err = pcall(RegisterScriptCallback, name, fn)
+		if not ok then
+			debug_log("~ ZHOPA2 north migration error | init_error reason [register_failed] callback [%s] detail [%s]", tostring(name), tostring(err))
+			return false
+		end
+		return true
+	end
+	local ok = true
+	ok = reg("save_state", save_state) and ok
+	ok = reg("load_state", load_state) and ok
+	ok = reg("actor_on_first_update", actor_on_first_update) and ok
+	ok = reg("actor_on_update", actor_on_update) and ok
+	ok = reg("on_game_load", on_game_load) and ok
+	ok = reg("on_option_change", on_option_change) and ok
+	ok = reg("server_entity_on_unregister", server_entity_on_unregister) and ok
+	ok = reg("server_entity_on_register", server_entity_on_register) and ok
+	ok = reg("squad_on_after_level_change", squad_on_after_level_change) and ok
+	callbacks_registered = ok == true
+	if callbacks_registered then
+		pending_reconcile = true
+		pending_source = pending_source or "on_game_start"
+	else
+		debug_log("~ ZHOPA2 north migration error | init_error reason [callbacks_not_registered]")
+	end
+	return callbacks_registered
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+M.TASK_NORTH_MIGRATION = TASK_NORTH_MIGRATION
+M.NORTH_LEVELS = NORTH_LEVELS
+M.NORTH_LEVEL_SET = NORTH_LEVEL_SET
+M.EXCLUDED_FACTIONS = EXCLUDED_FACTIONS
+M.save_state = save_state
+M.load_state = load_state
+M.reconcile_selected = reconcile_selected
+M.maybe_fire = maybe_fire
+
+_G.zhopa2_story_north_migration = M
+return M

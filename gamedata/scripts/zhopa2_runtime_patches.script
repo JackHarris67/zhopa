@@ -16,6 +16,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_service_fillers",
 	"zhopa2_artifacts",
 	"zhopa2_story_psy_watchdog",
+	"zhopa2_story_north_migration",
 }
 
 local ZHOPA2_RUNTIME_PATCHES = {

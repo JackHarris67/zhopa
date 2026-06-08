@@ -15,4 +15,8 @@
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Timing</text></string>
 	<string id="ui_mcm_zhopa2_story_psy_watchdog_enabled"><text>Brain Scorcher watchdog</text></string>
 	<string id="ui_mcm_zhopa2_story_psy_watchdog_enabled_desc"><text>Converts non-immune stalker squads on active psi levels into zombified squads.</text></string>
+	<string id="ui_mcm_zhopa2_story_north_migration_enabled"><text>North migration</text></string>
+	<string id="ui_mcm_zhopa2_story_north_migration_enabled_desc"><text>After Brain Scorcher shutdown, routes selected stalker squads toward northern levels.</text></string>
+	<string id="ui_mcm_zhopa2_story_north_migration_percent"><text>North migration percent</text></string>
+	<string id="ui_mcm_zhopa2_story_north_migration_percent_desc"><text>Percent of eligible stalker squads selected when the story event fires.</text></string>
 </string_table>

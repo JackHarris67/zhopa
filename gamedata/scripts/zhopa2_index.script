@@ -846,6 +846,25 @@ function M.squads_on_levels(levels, limit)
 	end)
 end
 
+function M.squad_level_names()
+	local board = simboard()
+	if board and type(board.zhopa2_ensure_buckets) == "function" then
+		board:zhopa2_ensure_buckets()
+	end
+	local by_level = board and board.zhopa2_squads_by_level or nil
+	if type(by_level) ~= "table" then
+		return {}
+	end
+	local out = {}
+	for level_name in pairs(by_level) do
+		if type(level_name) == "string" and level_name ~= "" then
+			out[#out + 1] = level_name
+		end
+	end
+	table.sort(out)
+	return out
+end
+
 function M.unregister_base_camping_target(squad)
 	if not (squad and squad.id) then
 		return false
