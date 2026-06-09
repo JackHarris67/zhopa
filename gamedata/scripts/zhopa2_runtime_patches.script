@@ -162,21 +162,36 @@ function M.zhopa2_object_location(obj)
 	if not obj then
 		return nil, nil, nil
 	end
-	if type(obj.position) == "function" then
-		local ok_pos, pos = pcall(obj.position, obj)
-		local lv_id = nil
-		local gv_id = nil
-		if type(obj.level_vertex_id) == "function" then
-			local ok_lv, value = pcall(obj.level_vertex_id, obj)
+	local lv_id = tonum(obj.m_level_vertex_id)
+	local gv_id = tonum(obj.m_game_vertex_id)
+	if lv_id and lv_id < 4294967295 and level and type(level.vertex_position) == "function" then
+		local ok_vertex_pos, vertex_pos = pcall(level.vertex_position, lv_id)
+		if ok_vertex_pos and vertex_pos then
+			return vertex_pos, lv_id, gv_id
+		end
+	end
+	local ok_position_member, position_member = pcall(function()
+		return obj.position
+	end)
+	if ok_position_member and type(position_member) == "function" then
+		local ok_pos, pos = pcall(position_member, obj)
+		local ok_lv_member, lv_member = pcall(function()
+			return obj.level_vertex_id
+		end)
+		if ok_lv_member and type(lv_member) == "function" then
+			local ok_lv, value = pcall(lv_member, obj)
 			lv_id = ok_lv and tonum(value) or nil
 		end
-		if type(obj.game_vertex_id) == "function" then
-			local ok_gv, value = pcall(obj.game_vertex_id, obj)
+		local ok_gv_member, gv_member = pcall(function()
+			return obj.game_vertex_id
+		end)
+		if ok_gv_member and type(gv_member) == "function" then
+			local ok_gv, value = pcall(gv_member, obj)
 			gv_id = ok_gv and tonum(value) or nil
 		end
 		return ok_pos and pos or nil, lv_id, gv_id
 	end
-	return obj.position, tonum(obj.m_level_vertex_id), tonum(obj.m_game_vertex_id)
+	return ok_position_member and position_member or nil, lv_id, gv_id
 end
 
 function M.zhopa2_direct_hunt_target_anchor(target)
@@ -1949,8 +1964,35 @@ local function targeted_gather_blocks_job(smart, npc_info)
 	return true
 end
 
+local function clear_trade_path_override(st)
+	if not (st and st.zhopa2_trade_path_override == true) then
+		return
+	end
+	local npc = st.object
+	local npc_id = object_id(npc)
+	local npc_name = nil
+	if npc and type(npc.name) == "function" then
+		local ok, value = pcall(npc.name, npc)
+		npc_name = ok and value or nil
+	end
+	if npc_id and npc_name and type(se_save_var) == "function" then
+		local count = tonumber(st.zhopa2_trade_path_points) or 8
+		for i = 1, count do
+			pcall(se_save_var, npc_id, npc_name, "pathpoint" .. tostring(i), nil)
+		end
+	end
+	if npc and st.zhopa2_trade_path_had_patrol_mode ~= true and type(npc.disable_info_portion) == "function" then
+		pcall(npc.disable_info_portion, npc, "npcx_beh_patrol_mode")
+	end
+	st.zhopa2_trade_path_override = nil
+	st.zhopa2_trade_path_points = nil
+	st.zhopa2_trade_path_had_patrol_mode = nil
+	st.zhopa2_trade_path_reason = nil
+end
+
 local function clear_forced_trade_job(st)
 	if st then
+		clear_trade_path_override(st)
 		st.has_items_to_sell = false
 		st.zhopa2_trade_squad_id = nil
 		st.zhopa2_trade_smart_id = nil
@@ -1963,6 +2005,13 @@ local function clear_forced_trade_job(st)
 			empty_table(st.trade_items)
 		end
 	end
+end
+
+local function reset_beh_path_index(npc)
+	if not (npc and type(save_var) == "function") then
+		return
+	end
+	pcall(save_var, npc, "path_index", 1)
 end
 
 local function reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section)
@@ -1992,7 +2041,11 @@ local function reassign_forced_trade_job(smart, npc_info, st, npc_id, force_sect
 	if st.object and smart.setup_logic then
 		npc_info.begin_job = true
 		empty_table(db.offline_objects[npc_id])
+		reset_beh_path_index(st.object)
 		smart:setup_logic(st.object)
+		if type(st.beh) == "table" then
+			st.beh.desired_target = nil
+		end
 	end
 	return true
 end

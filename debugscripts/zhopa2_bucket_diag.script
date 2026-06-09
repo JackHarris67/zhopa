@@ -268,6 +268,105 @@ local function flags_text(flags)
 	)
 end
 
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if obj then
+		return obj
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, value = pcall(level.object_by_id, id)
+		if ok then
+			return value
+		end
+	end
+	return nil
+end
+
+local function storage_by_id(id)
+	id = tonumber(id)
+	return id and db and db.storage and db.storage[id] or nil
+end
+
+local function current_action_id(npc)
+	if not (npc and type(npc.motivation_action_manager) == "function") then
+		return nil
+	end
+	local ok_mgr, mgr = pcall(npc.motivation_action_manager, npc)
+	if not (ok_mgr and mgr and type(mgr.current_action_id) == "function") then
+		return nil
+	end
+	local ok_id, action_id = pcall(mgr.current_action_id, mgr)
+	return ok_id and action_id or nil
+end
+
+local function current_state(npc)
+	if not (state_mgr and type(state_mgr.get_state) == "function") then
+		return nil
+	end
+	local ok, value = pcall(state_mgr.get_state, npc)
+	return ok and value or nil
+end
+
+local function current_point_index(npc)
+	if not (npc and type(npc.get_current_point_index) == "function") then
+		return nil
+	end
+	local ok, value = pcall(npc.get_current_point_index, npc)
+	return ok and value or nil
+end
+
+local function path_index(npc)
+	if not (npc and type(load_var) == "function") then
+		return nil
+	end
+	local ok, value = pcall(load_var, npc, "path_index", nil)
+	return ok and value or nil
+end
+
+local function trade_slot_for_npc(smart, npc_id)
+	if not (smart and smart.npc_by_job_section and npc_id) then
+		return nil
+	end
+	for section, owner_id in pairs(smart.npc_by_job_section) do
+		if tonumber(owner_id) == tonumber(npc_id) then
+			local text = string.lower(tostring(section or ""))
+			if string.find(text, "beh_trade_job", 1, true) or string.find(text, "trade_slot", 1, true) then
+				return section
+			end
+		end
+	end
+	for section, owner_id in pairs(smart.npc_by_job_section) do
+		if tonumber(owner_id) == tonumber(npc_id) then
+			return section
+		end
+	end
+	return nil
+end
+
+local function binding_state()
+	local economy = rawget(_G, "zhopa2_economy")
+	if not economy and require then
+		pcall(require, "zhopa2_economy")
+		economy = rawget(_G, "zhopa2_economy")
+	end
+	local sell = xr_effects and xr_effects.trade_job_sell_items or nil
+	local give = xr_effects and xr_effects.trade_job_give_id or nil
+	local has = xr_conditions and xr_conditions.npc_has_items_to_sell or nil
+	return string.format(
+		"sell_economy=%s give_economy=%s has_economy=%s sell_type=%s give_type=%s has_type=%s",
+		tostring(economy and sell == economy.trade_job_sell_items),
+		tostring(economy and give == economy.trade_job_give_id),
+		tostring(economy and has == economy.npc_has_items_to_sell),
+		tostring(type(sell)),
+		tostring(type(give)),
+		tostring(type(has))
+	)
+end
+
 local function dump_level_bucket(name, bucket, resolver, level_map)
 	local printed_levels = 0
 	local printed_entries = 0
@@ -347,6 +446,8 @@ local function trade_state_relevant(squad)
 		or field_value(squad, "zhopa2_rest_trade_state") ~= nil
 		or field_value(squad, "zhopa2_base_trade_result") ~= nil
 		or field_value(squad, "zhopa2_trade_queue_state") ~= nil
+		or field_value(squad, "zhopa2_trade_prepared_until") ~= nil
+		or field_value(squad, "zhopa2_trade_prepared_npc_id") ~= nil
 end
 
 local function pcall_profile(fn, ...)
@@ -414,9 +515,11 @@ local function dump_trade_squad_candidates(board)
 					if offline_has == "true" or route_has == "true" then
 						work_yes = work_yes + 1
 					end
+					local prep_until = tonumber(field_value(squad, "zhopa2_trade_prepared_until"))
+					local now = time_global and time_global() or 0
 					printed = printed + 1
 					log(
-						"trade_candidate squad [%s] bucket_level [%s] real_level [%s] task [%s] smart [%s] target [%s] flags [%s] online [%s] has_smart [%s/%s] route_profile [%s/%s/%s] offline_work [%s/%s/%s] queue [%s] last [%s] detail [%s]",
+						"trade_candidate squad [%s] bucket_level [%s] real_level [%s] task [%s] smart [%s] target [%s] flags [%s] online [%s] has_smart [%s/%s] route_profile [%s/%s/%s] offline_work [%s/%s/%s] queue [%s] last [%s] detail [%s] prepared npc [%s] smart [%s] trader [%s] left [%s] reason [%s]",
 						named_id(squad or id),
 						tostring(level_key),
 						tostring(level_name_for_obj(squad) or "-"),
@@ -435,7 +538,12 @@ local function dump_trade_squad_candidates(board)
 						offline_value,
 						tostring(field_value(squad, "zhopa2_trade_queue_state") or "-"),
 						tostring(field_value(squad, "zhopa2_last_trade_result") or field_value(squad, "zhopa2_rest_trade_result") or field_value(squad, "zhopa2_base_trade_result") or "-"),
-						tostring(field_value(squad, "zhopa2_trade_detail") or "-")
+						tostring(field_value(squad, "zhopa2_trade_detail") or "-"),
+						tostring(field_value(squad, "zhopa2_trade_prepared_npc_id") or "-"),
+						tostring(field_value(squad, "zhopa2_trade_prepared_smart_id") or "-"),
+						tostring(field_value(squad, "zhopa2_trade_prepared_trader_id") or "-"),
+						tostring(prep_until and (prep_until - now) or "-"),
+						tostring(field_value(squad, "zhopa2_trade_prepared_reason") or "-")
 					)
 				end
 			end
@@ -452,6 +560,80 @@ local function dump_trade_squad_candidates(board)
 	)
 	if relevant > printed then
 		log("trade_candidates entries_truncated shown [%s] total [%s]", tostring(printed), tostring(relevant))
+	end
+end
+
+local function dump_prepared_trade_squads(board)
+	local printed = 0
+	for _, squad_id in ipairs(sorted_keys(board and board.squads)) do
+		local squad = squad_from_board(board, squad_id, board.squads and board.squads[squad_id])
+		if squad and (field_value(squad, "zhopa2_last_trade_result") == "trade_prepared" or field_value(squad, "zhopa2_trade_prepared_until") ~= nil) then
+			if printed >= MAX_TRADE_SQUAD_LINES then
+				log("prepared_trade entries_truncated shown [%s] limit [%s]", tostring(printed), tostring(MAX_TRADE_SQUAD_LINES))
+				return
+			end
+			printed = printed + 1
+			local npc_id = tonumber(field_value(squad, "zhopa2_trade_prepared_npc_id"))
+			local smart_id = tonumber(field_value(squad, "zhopa2_trade_prepared_smart_id") or field_value(squad, "zhopa2_last_trade_smart"))
+			local trader_id = tonumber(field_value(squad, "zhopa2_trade_prepared_trader_id"))
+			local npc = online_object_by_id(npc_id)
+			local smart = smart_from_board(board, smart_id) or safe_alife_object(smart_id)
+			local st = storage_by_id(npc_id)
+			local info = smart and smart.npc_info and npc_id and (smart.npc_info[npc_id] or smart.npc_info[tonumber(npc_id)]) or nil
+			local job = info and info.job or nil
+			local slot = trade_slot_for_npc(smart, npc_id)
+			local now = time_global and time_global() or 0
+			local until_tg = tonumber(field_value(squad, "zhopa2_trade_prepared_until"))
+			log(
+				"prepared_trade squad [%s] level [%s] task [%s] result [%s] reason [%s] npc [%s] trader [%s] smart [%s] left [%s] queue [%s] detail [%s]",
+				named_id(squad),
+				tostring(level_name_for_obj(squad) or "-"),
+				tostring(field_value(squad, "zhopa2_task") or "-"),
+				tostring(field_value(squad, "zhopa2_last_trade_result") or "-"),
+				tostring(field_value(squad, "zhopa2_trade_prepared_reason") or "-"),
+				named_id(npc or npc_id or "-"),
+				named_id(trader_id or "-"),
+				named_id(smart or smart_id or "-"),
+				tostring(until_tg and (until_tg - now) or "-"),
+				tostring(field_value(squad, "zhopa2_trade_queue_state") or "-"),
+				tostring(field_value(squad, "zhopa2_trade_detail") or "-")
+			)
+			log(
+				"prepared_trade_npc npc [%s] online [%s] storage [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_until [%s] trader_id [%s] member_ids [%s]",
+				named_id(npc or npc_id or "-"),
+				tostring(npc ~= nil),
+				tostring(st ~= nil),
+				tostring(st and st.section_logic or "-"),
+				tostring(st and st.active_section or "-"),
+				tostring(st and st.active_scheme or "-"),
+				tostring(current_state(npc) or "-"),
+				tostring(current_action_id(npc) or "-"),
+				tostring(current_point_index(npc) or "-"),
+				tostring(path_index(npc) or "-"),
+				tostring(st and st.zhopa2_trade_force_job_section or "-"),
+				tostring(st and st.zhopa2_trade_force_until or "-"),
+				tostring(st and st.zhopa2_trade_trader_id or "-"),
+				tostring(st and st.zhopa2_trade_member_ids and table_count(st.zhopa2_trade_member_ids) or "-")
+			)
+			log(
+				"prepared_trade_job smart [%s] slot [%s] owner [%s] info [%s] job [%s] job_section [%s] job_idle [%s] seller [%s] begin_job [%s] need_job [%s] has_items [%s] trade_items [%s]",
+				named_id(smart or smart_id or "-"),
+				tostring(slot or "-"),
+				tostring(smart and smart.npc_by_job_section and slot and smart.npc_by_job_section[slot] or "-"),
+				tostring(info ~= nil),
+				tostring(job ~= nil),
+				tostring(job and job.section or "-"),
+				tostring(job and job.idle or "-"),
+				tostring(job and job.seller_id or "-"),
+				tostring(info and info.begin_job or "-"),
+				tostring(info and info.need_job or "-"),
+				tostring(st and st.has_items_to_sell or "-"),
+				tostring(st and st.trade_items and table_count(st.trade_items) or "-")
+			)
+		end
+	end
+	if printed <= 0 then
+		log("prepared_trade empty")
 	end
 end
 
@@ -670,6 +852,7 @@ function M.dump(reason)
 		log("end no_simboard")
 		return false
 	end
+	log("binding %s", binding_state())
 
 	local smart_levels, smart_entries = bucket_stats(board.zhopa2_smarts_by_level)
 	local squad_levels, squad_entries = bucket_stats(board.zhopa2_squads_by_level)
@@ -710,6 +893,7 @@ function M.dump(reason)
 	dump_level_bucket("trade_smarts_by_level", board.zhopa2_trade_smarts_by_level, function(id) return smart_from_board(board, id) end, board.zhopa2_trade_smart_level)
 	dump_trade_flags(board)
 	dump_trade_squad_candidates(board)
+	dump_prepared_trade_squads(board)
 	dump_index_summary()
 	dump_index_buckets()
 	log("end")

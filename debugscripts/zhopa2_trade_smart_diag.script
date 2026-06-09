@@ -5,12 +5,14 @@ local RETRY_MS = 2000
 local MAX_ATTEMPTS = 4
 local MAX_ROUTE_SMARTS = 500
 local MAX_FLAG_SMARTS = 800
-local AUTO_DUMP_ENABLED = false
+local MAX_SERVICE_SLOT_LINES = 1200
+local AUTO_DUMP_ENABLED = true
 
 local scheduled = false
 local dumped = false
 local next_dump_tg = nil
 local attempts = 0
+local service_slot_lines = 0
 
 local function cfg_mod()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -267,6 +269,138 @@ local function flag_text(flags)
 	)
 end
 
+local function lower_text(value)
+	return type(value) == "string" and string.lower(value) or nil
+end
+
+local function contains_plain(value, needle)
+	value = lower_text(value)
+	return value ~= nil and string.find(value, needle, 1, true) ~= nil
+end
+
+local function job_field(job, field)
+	if type(job) ~= "table" then
+		return nil
+	end
+	return job[field]
+end
+
+local function job_section(job)
+	return job_field(job, "section") or job
+end
+
+local function job_suitable(job, smart)
+	local value = job_field(job, "suitable")
+	if value ~= nil then
+		return value
+	end
+	local section = job_section(job)
+	local ini = smart_ini(smart)
+	if not (ini and section) then
+		return nil
+	end
+	if type(ini.line_exist) == "function" then
+		local ok_line, exists = pcall(ini.line_exist, ini, section, "suitable")
+		if ok_line and exists ~= true then
+			return nil
+		end
+	end
+	if type(ini.r_string_ex) == "function" then
+		local ok, result = pcall(ini.r_string_ex, ini, section, "suitable")
+		if ok then
+			return result
+		end
+	end
+	return nil
+end
+
+local function job_is_trade_customer(job, smart)
+	local section = job_field(job, "section") or job
+	return contains_plain(section, "beh_trade_job")
+		or contains_plain(section, "trade_slot")
+		or contains_plain(job_suitable(job, smart), "npc_has_items_to_sell")
+		or contains_plain(job_suitable(job, smart), "npc_has_tech_items")
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if obj then
+		return obj
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, value = pcall(level.object_by_id, id)
+		if ok then
+			return value
+		end
+	end
+	return nil
+end
+
+local function storage_by_id(id)
+	id = tonumber(id)
+	return id and db and db.storage and db.storage[id] or nil
+end
+
+local function current_action_id(npc)
+	if not (npc and type(npc.motivation_action_manager) == "function") then
+		return nil
+	end
+	local ok_mgr, mgr = pcall(npc.motivation_action_manager, npc)
+	if not (ok_mgr and mgr and type(mgr.current_action_id) == "function") then
+		return nil
+	end
+	local ok_id, action_id = pcall(mgr.current_action_id, mgr)
+	return ok_id and action_id or nil
+end
+
+local function current_state(npc)
+	if not (state_mgr and type(state_mgr.get_state) == "function") then
+		return nil
+	end
+	local ok, value = pcall(state_mgr.get_state, npc)
+	return ok and value or nil
+end
+
+local function current_point_index(npc)
+	if not (npc and type(npc.get_current_point_index) == "function") then
+		return nil
+	end
+	local ok, value = pcall(npc.get_current_point_index, npc)
+	return ok and value or nil
+end
+
+local function path_index(npc)
+	if not (npc and type(load_var) == "function") then
+		return nil
+	end
+	local ok, value = pcall(load_var, npc, "path_index", nil)
+	return ok and value or nil
+end
+
+local function binding_state()
+	local economy = rawget(_G, "zhopa2_economy")
+	if not economy and require then
+		pcall(require, "zhopa2_economy")
+		economy = rawget(_G, "zhopa2_economy")
+	end
+	local sell = xr_effects and xr_effects.trade_job_sell_items or nil
+	local give = xr_effects and xr_effects.trade_job_give_id or nil
+	local has = xr_conditions and xr_conditions.npc_has_items_to_sell or nil
+	return string.format(
+		"sell_economy=%s give_economy=%s has_economy=%s sell_type=%s give_type=%s has_type=%s",
+		tostring(economy and sell == economy.trade_job_sell_items),
+		tostring(economy and give == economy.trade_job_give_id),
+		tostring(economy and has == economy.npc_has_items_to_sell),
+		tostring(type(sell)),
+		tostring(type(give)),
+		tostring(type(has))
+	)
+end
+
 local function route_bucket_count(buckets)
 	local total = 0
 	local levels = 0
@@ -307,6 +441,57 @@ local function flag_counts(flags_by_smart)
 	return out
 end
 
+local function dump_service_slots_for_smart(smart, tag)
+	if not (smart and type(smart.stalker_jobs) == "table") then
+		return
+	end
+	for i = 1, #smart.stalker_jobs do
+		if service_slot_lines >= MAX_SERVICE_SLOT_LINES then
+			return
+		end
+		local job = smart.stalker_jobs[i]
+		if job_is_trade_customer(job, smart) then
+			local section = job_section(job)
+			local suitable = job_suitable(job, smart)
+			local owner_id = smart.npc_by_job_section and section and smart.npc_by_job_section[section] or nil
+			local info = smart.npc_info and owner_id and (smart.npc_info[owner_id] or smart.npc_info[tonumber(owner_id)]) or nil
+			local st = storage_by_id(owner_id)
+			local npc = online_object_by_id(owner_id)
+			local active_job = info and info.job or nil
+			service_slot_lines = service_slot_lines + 1
+			log(
+				"service_slot tag [%s] smart [%s] job_index [%s] slot [%s] suitable [%s] owner [%s] online [%s] storage [%s] info [%s] info_job [%s] info_job_section [%s] begin_job [%s] need_job [%s] job_idle [%s] seller [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_until [%s] has_items [%s] trade_items [%s]",
+				tostring(tag or "-"),
+				named_id(smart),
+				tostring(i),
+				tostring(section or "-"),
+				tostring(suitable or "-"),
+				tostring(owner_id or "-"),
+				tostring(npc ~= nil),
+				tostring(st ~= nil),
+				tostring(info ~= nil),
+				tostring(active_job ~= nil),
+				tostring(active_job and active_job.section or "-"),
+				tostring(info and info.begin_job or "-"),
+				tostring(info and info.need_job or "-"),
+				tostring(active_job and active_job.idle or "-"),
+				tostring(active_job and active_job.seller_id or "-"),
+				tostring(st and st.section_logic or "-"),
+				tostring(st and st.active_section or "-"),
+				tostring(st and st.active_scheme or "-"),
+				tostring(current_state(npc) or "-"),
+				tostring(current_action_id(npc) or "-"),
+				tostring(current_point_index(npc) or "-"),
+				tostring(path_index(npc) or "-"),
+				tostring(st and st.zhopa2_trade_force_job_section or "-"),
+				tostring(st and st.zhopa2_trade_force_until or "-"),
+				tostring(st and st.has_items_to_sell or "-"),
+				tostring(st and st.trade_items and table_count(st.trade_items) or "-")
+			)
+		end
+	end
+end
+
 local function dump_route_buckets(board)
 	local buckets = board and board.zhopa2_trade_smarts_by_level or nil
 	local flags_by_smart = board and board.zhopa2_trade_smart_flags or nil
@@ -334,6 +519,7 @@ local function dump_route_buckets(board)
 				tostring(section_line_count(ini, "exclusive")),
 				flag_text(flags)
 			)
+			dump_service_slots_for_smart(smart, "route")
 		end
 	end
 	if printed <= 0 then
@@ -365,6 +551,7 @@ local function dump_flagged_smarts(board)
 			tostring(section_line_count(ini, "exclusive")),
 			flag_text(flags)
 		)
+		dump_service_slots_for_smart(smart, "flag")
 	end
 	if printed <= 0 then
 		log("flagged_smarts_empty")
@@ -381,6 +568,7 @@ function M.dump(reason)
 	local smart_level = board and board.zhopa2_trade_smart_level or nil
 	local route_levels, route_smarts = route_bucket_count(buckets)
 	local counts = flag_counts(flags_by_smart)
+	service_slot_lines = 0
 	log(
 		"begin reason [%s] board [%s] smarts [%s] actor [%s] actor_level [%s] route_levels [%s] route_smarts [%s] flags [%s] flag_route [%s] providers [%s] customers [%s] provider_only [%s] customer_only [%s] smart_level [%s]",
 		tostring(reason or "-"),
@@ -402,7 +590,7 @@ function M.dump(reason)
 		log("end no_simboard")
 		return false
 	end
-	log("register_fn [%s] unregister_fn [%s]", tostring(type(board.zhopa2_register_trade_smart)), tostring(type(board.zhopa2_unregister_trade_smart)))
+	log("register_fn [%s] unregister_fn [%s] binding [%s]", tostring(type(board.zhopa2_register_trade_smart)), tostring(type(board.zhopa2_unregister_trade_smart)), binding_state())
 	dump_route_buckets(board)
 	dump_flagged_smarts(board)
 	log("end")

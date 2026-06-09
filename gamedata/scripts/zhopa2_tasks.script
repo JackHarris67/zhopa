@@ -675,6 +675,7 @@ local function rest_trade_result_is_final(result)
 		or result == "no_trade_budget"
 		or result == "no_offline_member"
 		or result == "offline_nothing_to_trade"
+		or result == "trade_prepared_timeout"
 		or result == "no_trade_smart"
 		or result == "disabled"
 		or result == "economy_missing"
