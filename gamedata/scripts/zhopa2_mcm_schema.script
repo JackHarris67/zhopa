@@ -14,7 +14,7 @@ local OPTION_DEFS = {
 	revenge_enabled = { type = "check", val = 1, def = true },
 	revenge_actor_enabled = { type = "check", val = 1, def = true },
 	revenge_actor_chance = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 10 },
-	artefact_enabled = { type = "check", val = 1, def = false },
+	artefact_enabled = { type = "check", val = 1, def = true },
 	artefact_offline_enabled = { type = "check", val = 1, def = true },
 	rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
 	patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
