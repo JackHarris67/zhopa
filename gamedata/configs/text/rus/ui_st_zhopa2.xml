@@ -34,6 +34,8 @@
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled_desc"><text>Разрешает оффлайн-задачам на артефакты использовать виртуальные цели, созданные по настройкам аномалий, если подходящего реального артефакта нет. Реальные артефакты все равно выбираются первыми.</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled"><text>Экономика и торговля NPC</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled_desc"><text>Включает торговое поведение отрядов: продажу предметов онлайн, оффлайн-бартер, автоматическую торговлю во время отдыха и отдельные торговые маршруты.</text></string>
+	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>Множитель цены продажи NPC</text></string>
+	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Определяет, какую долю стоимости предметов отряды NPC получают при продаже снаряжения торговцам. Низкое значение замедляет доход отрядов и не влияет на их закупки.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled"><text>Выжигатель: зомбирование отрядов</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled_desc"><text>В сюжетном режиме превращает незащищенные отряды сталкеров на активных пси-локациях в зомбированных. Список иммунных фракций задается в конфиге.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_north_migration_enabled"><text>Миграция на север после Выжигателя</text></string>

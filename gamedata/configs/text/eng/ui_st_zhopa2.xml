@@ -34,6 +34,8 @@
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled_desc"><text>Allows offline artefact tasks to use virtual artefacts generated from anomaly settings when no suitable real artefact exists. Real artefacts are still preferred.</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled"><text>NPC economy and trade</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled_desc"><text>Enables squad trade behavior: online sales to traders, offline barter accounting, automatic rest/base trading, and dedicated trade route tasks.</text></string>
+	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>NPC sale price multiplier</text></string>
+	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Sets what fraction of item value NPC squads receive when selling gear to traders. A lower value slows squad income without changing NPC purchases.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled"><text>Brain Scorcher zombification</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled_desc"><text>In story mode, converts non-immune stalker squads on active psi levels into zombified squads. Immune factions are controlled by config.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_north_migration_enabled"><text>Northern migration after Brain Scorcher</text></string>

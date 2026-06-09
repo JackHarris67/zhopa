@@ -14,7 +14,7 @@ local C = {
 	GRENADE_KEEP = 2,
 	FOOD_KEEP = 1,
 	DRINK_KEEP = 1,
-	NPC_SELL_FACTOR = 0.5,
+	NPC_SELL_FACTOR = 0.2,
 	NPC_BUY_FACTOR = 1.0,
 	DEFAULT_BUY_ITEM_EXPONENT = 2.25,
 	AUTO_TRADE_MIN_MINOR_SELL_VALUE = 1000,
@@ -584,6 +584,16 @@ end
 
 local function section_contains(section, needle)
 	return type(section) == "string" and string.find(section, needle, 1, true) ~= nil
+end
+
+function M.npc_sell_price_multiplier()
+	local cfg = cfg_mod()
+	local value = C.NPC_SELL_FACTOR
+	if cfg and type(cfg.get_num) == "function" then
+		value = cfg.get_num("npc_sell_price_multiplier", C.NPC_SELL_FACTOR)
+	end
+	value = tonumber(value) or C.NPC_SELL_FACTOR
+	return math.max(0, math.min(10, value))
 end
 
 local function item_condition(item)
@@ -1202,7 +1212,7 @@ function M.online_trade_sell_item_price(npc, trader, item)
 	local base_cost = item_cost(item, section)
 	local condition = item_condition(item)
 	local condition_factor = math.pow((condition * 0.9) + 0.1, C.DEFAULT_BUY_ITEM_EXPONENT)
-	local price = math.floor((base_cost or 30) * condition_factor * C.NPC_SELL_FACTOR)
+	local price = math.floor((base_cost or 30) * condition_factor * M.npc_sell_price_multiplier())
 	if price < 1 and (base_cost or 0) > 0 then
 		price = 1
 	end
@@ -1437,7 +1447,7 @@ local function offline_trade_item_price(item)
 	local base_cost = item_cost(item, section)
 	local condition = item_condition(item)
 	local condition_factor = math.pow((condition * 0.9) + 0.1, C.DEFAULT_BUY_ITEM_EXPONENT)
-	return offline_round_money((base_cost or 30) * condition_factor * C.NPC_SELL_FACTOR)
+	return offline_round_money((base_cost or 30) * condition_factor * M.npc_sell_price_multiplier())
 end
 
 local function offline_buy_section_price(section)
