@@ -1848,17 +1848,18 @@ local function set_actor_community_goodwill(community, goodwill)
 end
 
 local function online_actor_goodwill(obj)
-	if not (obj and db and db.actor) then
+	local actor = db and db.actor or nil
+	if not (obj and actor) then
 		return nil
 	end
 	if type(obj.general_goodwill) == "function" then
-		local ok, goodwill = pcall(obj.general_goodwill, obj, db.actor)
+		local ok, goodwill = pcall(obj.general_goodwill, obj, actor)
 		if ok and goodwill ~= nil then
 			return tonumber(goodwill) or nil
 		end
 	end
 	if type(obj.goodwill) == "function" then
-		local ok, goodwill = pcall(obj.goodwill, obj, db.actor)
+		local ok, goodwill = pcall(obj.goodwill, obj, actor)
 		return ok and tonumber(goodwill) or nil
 	end
 	return nil

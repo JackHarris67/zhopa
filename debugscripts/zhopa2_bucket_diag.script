@@ -348,19 +348,14 @@ local function trade_slot_for_npc(smart, npc_id)
 end
 
 local function binding_state()
-	local economy = rawget(_G, "zhopa2_economy")
-	if not economy and require then
-		pcall(require, "zhopa2_economy")
-		economy = rawget(_G, "zhopa2_economy")
-	end
 	local sell = xr_effects and xr_effects.trade_job_sell_items or nil
 	local give = xr_effects and xr_effects.trade_job_give_id or nil
 	local has = xr_conditions and xr_conditions.npc_has_items_to_sell or nil
 	return string.format(
-		"sell_economy=%s give_economy=%s has_economy=%s sell_type=%s give_type=%s has_type=%s",
-		tostring(economy and sell == economy.trade_job_sell_items),
-		tostring(economy and give == economy.trade_job_give_id),
-		tostring(economy and has == economy.npc_has_items_to_sell),
+		"sell_present=%s give_present=%s has_present=%s sell_type=%s give_type=%s has_type=%s",
+		tostring(type(sell) == "function"),
+		tostring(type(give) == "function"),
+		tostring(type(has) == "function"),
 		tostring(type(sell)),
 		tostring(type(give)),
 		tostring(type(has))
@@ -599,7 +594,7 @@ local function dump_prepared_trade_squads(board)
 				tostring(field_value(squad, "zhopa2_trade_detail") or "-")
 			)
 			log(
-				"prepared_trade_npc npc [%s] online [%s] storage [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_until [%s] trader_id [%s] member_ids [%s]",
+				"prepared_trade_npc npc [%s] online [%s] storage [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_until [%s] legacy_trader_id [%s] member_ids [%s]",
 				named_id(npc or npc_id or "-"),
 				tostring(npc ~= nil),
 				tostring(st ~= nil),

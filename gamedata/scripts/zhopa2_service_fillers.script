@@ -748,6 +748,7 @@ end
 
 local function collect_existing_roles(smart, engine_owner)
 	local existing = {}
+	local native_existing = {}
 	local service_count = 0
 	if smart and type(smart.npc_info) == "table" then
 		for _, info in pairs(smart.npc_info) do
@@ -755,11 +756,13 @@ local function collect_existing_roles(smart, engine_owner)
 			if role then
 				existing[role] = true
 				service_count = service_count + 1
-				if engine_owner then
-					if zhop_service_squad(squad, section) then
+				if zhop_service_squad(squad, section) then
+					if engine_owner then
 						adopt_service_member(info.se_obj, smart, engine_owner, section)
 						adopt_service_squad(squad, smart, engine_owner, section)
 					end
+				else
+					native_existing[role] = true
 				end
 			end
 		end
@@ -782,7 +785,7 @@ local function collect_existing_roles(smart, engine_owner)
 			end
 		end
 	end
-	return existing, service_count
+	return existing, service_count, native_existing
 end
 
 local function roles_from_set(set)
@@ -826,6 +829,7 @@ local function clear_smart_fields(smart)
 	smart.zhopa2_service_allowed_roles = nil
 	smart.zhopa2_service_missing_count = nil
 	smart.zhopa2_service_missing_roles = nil
+	smart.zhopa2_service_native_roles = nil
 	smart.zhopa2_service_needs_fill = nil
 end
 
@@ -931,7 +935,7 @@ function M.reconcile_smart(smart, ownership, allow_spawn, reason)
 	end
 
 	local allowed = collect_allowed_roles(smart)
-	local existing, service_count = collect_existing_roles(smart, engine_owner)
+	local existing, service_count, native_existing = collect_existing_roles(smart, engine_owner)
 	local allowed_list = roles_from_set(allowed)
 	local missing = missing_roles(allowed, existing)
 	local needs_fill = #missing > 0
@@ -941,6 +945,7 @@ function M.reconcile_smart(smart, ownership, allow_spawn, reason)
 	smart.zhopa2_service_allowed_roles = roles_string(allowed_list)
 	smart.zhopa2_service_missing_count = #missing
 	smart.zhopa2_service_missing_roles = roles_string(missing)
+	smart.zhopa2_service_native_roles = roles_string(roles_from_set(native_existing))
 	smart.zhopa2_service_needs_fill = needs_fill
 
 	if needs_fill then

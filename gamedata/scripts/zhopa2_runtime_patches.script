@@ -12,6 +12,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_topology",
 	"zhopa2_loot",
 	"zhopa2_economy",
+	"zhopa2_smart_service_slot_doctor",
 	"zhopa2_revenge",
 	"zhopa2_service_fillers",
 	"zhopa2_artifacts",
@@ -2300,129 +2301,6 @@ local function targeted_gather_blocks_job(smart, npc_info)
 	return true
 end
 
-local function clear_trade_path_override(st)
-	if not (st and st.zhopa2_trade_path_override == true) then
-		return
-	end
-	local npc = st.object
-	local npc_id = object_id(npc)
-	local npc_name = nil
-	if npc and type(npc.name) == "function" then
-		local ok, value = pcall(npc.name, npc)
-		npc_name = ok and value or nil
-	end
-	if npc_id and npc_name and type(se_save_var) == "function" then
-		local count = tonumber(st.zhopa2_trade_path_points) or 8
-		for i = 1, count do
-			pcall(se_save_var, npc_id, npc_name, "pathpoint" .. tostring(i), nil)
-		end
-	end
-	if npc and st.zhopa2_trade_path_had_patrol_mode ~= true and type(npc.disable_info_portion) == "function" then
-		pcall(npc.disable_info_portion, npc, "npcx_beh_patrol_mode")
-	end
-	st.zhopa2_trade_path_override = nil
-	st.zhopa2_trade_path_points = nil
-	st.zhopa2_trade_path_had_patrol_mode = nil
-	st.zhopa2_trade_path_reason = nil
-end
-
-local function clear_forced_trade_job(st)
-	if st then
-		clear_trade_path_override(st)
-		st.has_items_to_sell = false
-		st.zhopa2_trade_squad_id = nil
-		st.zhopa2_trade_smart_id = nil
-		st.zhopa2_trade_force_job_section = nil
-		st.zhopa2_trade_force_until = nil
-		st.zhopa2_trade_trader_id = nil
-		st.zhopa2_trade_reason = nil
-		st.zhopa2_trade_member_ids = nil
-		if st.trade_items then
-			empty_table(st.trade_items)
-		end
-	end
-end
-
-local function reset_beh_path_index(npc)
-	if not (npc and type(save_var) == "function") then
-		return
-	end
-	pcall(save_var, npc, "path_index", 1)
-end
-
-local function reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section)
-	local tonum = tonumber
-	if not (smart and npc_info and st and npc_id and force_section) then
-		return false
-	end
-	local owner = smart.npc_by_job_section and tonum(smart.npc_by_job_section[force_section]) or nil
-	if owner and owner ~= tonum(npc_id) then
-		return false
-	end
-	local job = smart.find_job_by_section and smart:find_job_by_section(force_section) or nil
-	if not job then
-		return false
-	end
-	if smart.npc_by_job_section then
-		for sec, npcid in pairs(smart.npc_by_job_section) do
-			if tonum(npcid) == tonum(npc_id) and sec ~= force_section then
-				smart.npc_by_job_section[sec] = nil
-			end
-		end
-		smart.npc_by_job_section[force_section] = npc_id
-	end
-	npc_info.job = job
-	npc_info.begin_job = false
-	npc_info.current_index = 1
-	if st.object and smart.setup_logic then
-		npc_info.begin_job = true
-		empty_table(db.offline_objects[npc_id])
-		reset_beh_path_index(st.object)
-		smart:setup_logic(st.object)
-		if type(st.beh) == "table" then
-			st.beh.desired_target = nil
-		end
-	end
-	return true
-end
-
-local function forced_trade_blocks_job(smart, npc_info)
-	if not (smart and npc_info and npc_info.se_obj and db and db.storage) then
-		return false
-	end
-	local npc_id = npc_info.se_obj.id
-	local st = npc_id and db.storage[npc_id] or nil
-	local force_section = st and st.zhopa2_trade_force_job_section or nil
-	if type(force_section) ~= "string" or force_section == "" then
-		return false
-	end
-	if st.has_items_to_sell ~= true then
-		clear_forced_trade_job(st)
-		return false
-	end
-	local now = time_global and time_global() or 0
-	if tonumber(st.zhopa2_trade_force_until or 0) <= now then
-		clear_forced_trade_job(st)
-		return false
-	end
-	local job = npc_info.job
-	if not (job and job.section == force_section) then
-		if reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section) then
-			return true
-		end
-		clear_forced_trade_job(st)
-		return false
-	end
-	if smart.npc_by_job_section and tonumber(smart.npc_by_job_section[force_section]) ~= tonumber(npc_id) then
-		if reassign_forced_trade_job(smart, npc_info, st, npc_id, force_section) then
-			return true
-		end
-		clear_forced_trade_job(st)
-		return false
-	end
-	return true
-end
-
 function M.safe_section_name(obj)
 	if not obj then
 		return nil
@@ -2570,10 +2448,6 @@ function M.patch_smart_terrain()
 				return original(self, npc_info, ...)
 			end
 			if M.has_targeted_gather_state(npc_info) and targeted_gather_blocks_job(self, npc_info) then
-				return
-			end
-			local st = M.npc_storage_from_info(npc_info)
-			if st and st.zhopa2_trade_force_job_section and forced_trade_blocks_job(self, npc_info) then
 				return
 			end
 			local service_relevant = M.service_job_check_relevant(npc_info)
@@ -3273,6 +3147,13 @@ local function zhopa2_event_item_ids()
 	return nil
 end
 
+local function zhopa2_consume_item_event_id(item_id)
+	local mod = zhopa2_loot_mod()
+	if mod and type(mod.consume_item_event_id) == "function" then
+		mod.consume_item_event_id(item_id)
+	end
+end
+
 local function zhopa2_targeted_item_ids(npc)
 	local mod = zhopa2_loot_mod()
 	if mod and type(mod.targeted_item_ids_for_npc) == "function" then
@@ -3931,6 +3812,7 @@ function M.zhopa2_mark_ground_gather_release(npc, item_id, reason)
 		item_id = tonumber(item_id),
 		reason = reason or "ground_item_loot",
 		due = (time_global and time_global() or 0) + 100,
+		watch_due = (time_global and time_global() or 0) + 3000,
 		expires = (time_global and time_global() or 0) + 15000,
 	}
 	return true
@@ -3943,6 +3825,19 @@ function M.zhopa2_peek_ground_gather_release(npc)
 		return nil
 	end
 	return pending[npc_id]
+end
+
+function M.zhopa2_ground_gather_settling(npc)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false
+	end
+	local pending = M.ground_gather_release_pending
+	if type(pending) == "table" and pending[npc_id] ~= nil then
+		return true
+	end
+	local meet_pending = M.ground_gather_meet_refresh_pending
+	return type(meet_pending) == "table" and meet_pending[npc_id] ~= nil
 end
 
 function M.zhopa2_take_ground_gather_release(npc)
@@ -3995,7 +3890,8 @@ function M.zhopa2_watch_ground_gather_release()
 			pending[npc_id] = nil
 		else
 			local st = db and db.storage and db.storage[npc_id] and db.storage[npc_id].gather_items or nil
-			if M.zhopa2_ground_gather_release_ready(npc, st, entry) then
+			local watch_due = tonumber(entry.watch_due or 0)
+			if (watch_due <= 0 or now >= watch_due) and M.zhopa2_ground_gather_release_ready(npc, st, entry) then
 				pending[npc_id] = nil
 				M.zhopa2_release_ground_gather_npc(npc, entry.reason)
 			end
@@ -4029,42 +3925,17 @@ function M.zhopa2_clear_pickup_state(npc)
 	if not npc_id then
 		return false
 	end
-	pcall(function()
-		npc:clear_animations()
-	end)
-	local root = db and db.storage and db.storage[npc_id] or nil
-	local sm = root and root.state_mgr or nil
-	if sm then
-		pcall(sm.set_state, sm, "idle", nil, nil, nil, { fast_set = true })
-		if sm.animation then
-			pcall(sm.animation.set_state, sm.animation, nil, true)
-			pcall(sm.animation.set_control, sm.animation)
-		end
-	else
-		pcall(function()
-			if state_mgr and state_mgr.set_state then
-				state_mgr.set_state(npc, "idle", nil, nil, nil, { fast_set = true })
-			end
-		end)
+	local smart = M.zhopa2_smart_for_online_npc(npc)
+	local info = smart and smart.npc_info and smart.npc_info[npc_id] or nil
+	if not (smart and info and info.job and type(smart.setup_logic) == "function") then
+		return false
 	end
-	pcall(function()
-		npc:set_desired_position()
-	end)
-	pcall(function()
-		npc:set_desired_direction()
-	end)
-	pcall(function()
-		if look and look.direction and type(npc.direction) == "function" then
-			npc:set_sight(look.direction, npc:direction(), 0)
-		end
-	end)
-	pcall(function()
-		local bw = type(npc.best_weapon) == "function" and npc:best_weapon() or nil
-		if bw and object and object.idle then
-			npc:set_item(object.idle, bw)
-		end
-	end)
-	return true
+	info.begin_job = true
+	if db and db.offline_objects and db.offline_objects[npc_id] then
+		clear_table(db.offline_objects[npc_id])
+	end
+	local ok = pcall(smart.setup_logic, smart, npc)
+	return ok == true
 end
 
 function M.zhopa2_refresh_meet_after_pickup(npc)
@@ -4153,38 +4024,9 @@ function M.zhopa2_release_ground_gather_npc(npc, reason)
 	if gather then
 		zhopa2_reset_gather_state(gather)
 	end
-	M.zhopa2_clear_pickup_state(npc)
 	M.zhopa2_mark_ground_gather_meet_refresh(npc)
-	reset_beh_path_index(npc)
 	if st and type(st.beh) == "table" then
 		st.beh.desired_target = nil
-	end
-	local smart = M.zhopa2_smart_for_online_npc(npc)
-	local info = smart and smart.npc_info and smart.npc_info[npc_id] or nil
-	if not info then
-		return false, "missing_smart_info"
-	end
-	if type(smart.clear_job) == "function" then
-		pcall(smart.clear_job, smart, npc_id)
-	end
-	if type(smart.npc_by_job_section) == "table" then
-		for section, owner_id in pairs(smart.npc_by_job_section) do
-			if tonumber(owner_id) == tonumber(npc_id) then
-				smart.npc_by_job_section[section] = nil
-			end
-		end
-	end
-	if db and db.offline_objects and db.offline_objects[npc_id] and type(empty_table) == "function" then
-		empty_table(db.offline_objects[npc_id])
-	end
-	info.job = nil
-	info.begin_job = false
-	info.need_job = "nil"
-	info.current_index = 1
-	if type(smart.select_npc_job) == "function" then
-		local ok, err = pcall(smart.select_npc_job, smart, info, true)
-		M.zhopa2_mark_ground_gather_meet_refresh(npc)
-		return ok == true, ok and (reason or "ground_gather_release") or err
 	end
 	return true, reason or "ground_gather_release"
 end
@@ -4310,6 +4152,38 @@ function zhopa2_clear_gather_item(npc, item_id, reason)
 	end
 	zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 	return true
+end
+
+function M.zhopa2_trade_context_active(npc)
+	local npc_id = object_id(npc)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	return st
+		and st.has_items_to_sell == true
+		and st.zhopa2_trade_squad_id ~= nil
+		and st.zhopa2_trade_smart_id ~= nil
+		or false
+end
+
+function M.zhopa2_trade_gather_blocked(npc, st)
+	if not M.zhopa2_trade_context_active(npc) then
+		return false
+	end
+	if st then
+		local selected_id = tonumber(st.selected_id)
+		if selected_id then
+			zhopa2_clear_gather_item(npc, selected_id, "trade_active")
+		else
+			zhopa2_reset_gather_state(st)
+		end
+		if M.zhopa2_reset_corpse_detection_state then
+			M.zhopa2_reset_corpse_detection_state(st)
+		end
+	end
+	return true
+end
+
+function M.patch_state_mgr_trade_run()
+	return false
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
@@ -4448,7 +4322,41 @@ local function zhopa2_gather_item_debug_status_impl(npc, item_id)
 	)
 end
 
-local function zhopa2_gather_item_replacement(original, force_selected)
+function M.zhopa2_debug_force_pickup(npc, st, item, reason)
+	if cfg_bool("debug_hud_enabled", false) ~= true then
+		return
+	end
+	local npc_pos = nil
+	if npc and type(npc.position) == "function" then
+		local ok, pos = pcall(npc.position, npc)
+		npc_pos = ok and pos or nil
+	end
+	local item_pos = nil
+	if item and type(item.position) == "function" then
+		local ok, pos = pcall(item.position, item)
+		item_pos = ok and pos or nil
+	end
+	local dist = npc_pos and item_pos and npc_pos:distance_to(item_pos) or nil
+	local state = nil
+	if state_mgr and type(state_mgr.get_state) == "function" then
+		local ok, value = pcall(state_mgr.get_state, npc)
+		state = ok and value or nil
+	end
+	zhopa2_debug_printf(
+		"~ ZHOPA2 loot force pickup | reason [%s] npc [%s:%s] item [%s:%s] distance [%s] state [%s] selected [%s] stage [%s]",
+		tostring(reason or "-"),
+		tostring(object_debug_name(npc)),
+		tostring(object_id(npc) or "-"),
+		tostring(object_debug_name(item)),
+		tostring(object_id(item) or "-"),
+		tostring(dist and math.floor(dist * 100) / 100 or "-"),
+		tostring(state or "-"),
+		tostring(st and st.selected_id or "-"),
+		tostring(st and st.stage or "-")
+	)
+end
+
+local function zhopa2_gather_item_replacement(original, force_selected, force_reason)
 	return function(npc, ...)
 		local id = npc and npc.id and npc:id() or nil
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items or nil
@@ -4507,6 +4415,9 @@ local function zhopa2_gather_item_replacement(original, force_selected)
 			end
 			return
 		end
+		if force_pickup or (zhopa2_active and not is_artifact) or st.zhopa2_artifact_force_pickup == true then
+			M.zhopa2_debug_force_pickup(npc, st, itm, force_reason or (force_pickup and "force_selected" or "managed_pickup"))
+		end
 		local items = gather_items_table()
 		items[selected_id] = nil
 		zhopa2_reset_gather_state(st)
@@ -4538,6 +4449,7 @@ local function zhopa2_gather_item_replacement(original, force_selected)
 				M.zhopa2_mark_ground_gather_release(npc, selected_id, "ground_weapon_loot")
 			end
 			alife_clone_weapon(se_itm, nil, id)
+			zhopa2_consume_item_event_id(selected_id)
 			zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 			return
 		end
@@ -4550,6 +4462,7 @@ local function zhopa2_gather_item_replacement(original, force_selected)
 		if alife_release then
 			alife_release(se_itm)
 		end
+		zhopa2_consume_item_event_id(selected_id)
 		zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 	end
 end
@@ -4562,6 +4475,9 @@ local function patch_gather_classes(mod)
 				local tonum = tonumber
 				local npc = self.object
 				local st = self.st
+				if M.zhopa2_trade_gather_blocked(npc, st) then
+					return false
+				end
 				local selected_id = st and tonum(st.selected_id) or nil
 				local selected_targeted = st and tonum(st.zhopa2_targeted_item_id) or nil
 				local has_targeted_requests = selected_targeted ~= nil or M.zhopa2_has_targeted_item_requests()
@@ -4656,6 +4572,9 @@ local function patch_gather_classes(mod)
 			return function(self, ...)
 				local npc = self.object
 				local st = self.st
+				if M.zhopa2_trade_gather_blocked(npc, st) then
+					return false
+				end
 				local has_targeted_requests = (st and st.zhopa2_targeted_item_id ~= nil) or M.zhopa2_has_targeted_item_requests()
 				local has_item_events = M.zhopa2_has_recent_item_events()
 				if not (has_targeted_requests or has_item_events) then
@@ -4705,9 +4624,14 @@ local function patch_gather_classes(mod)
 				local st = self.st
 				local npc = self.object
 				local release = M.zhopa2_peek_ground_gather_release(npc)
-				if release and M.zhopa2_ground_gather_release_ready(npc, st, release) then
+				local now = time_global and time_global() or 0
+				local release_watch_due = release and tonumber(release.watch_due or 0) or 0
+				if release and (release_watch_due <= 0 or now >= release_watch_due) and M.zhopa2_ground_gather_release_ready(npc, st, release) then
 					M.zhopa2_take_ground_gather_release(npc)
 					M.zhopa2_release_ground_gather_npc(npc, release.reason)
+					return
+				end
+				if M.zhopa2_trade_gather_blocked(npc, st) then
 					return
 				end
 				local item_id = st and tonumber(st.selected_id) or nil
@@ -4728,7 +4652,7 @@ local function patch_gather_classes(mod)
 				local item_pos = itm and itm:position() or nil
 				if not (targeted_artifact or active_selected) then
 					if vanilla_selected and M.zhopa2_gather_stalled(npc, st, item_id, st.vid_pos or item_pos) then
-						zhopa2_gather_item_replacement(nil, true)(npc)
+						zhopa2_gather_item_replacement(nil, true, "vanilla_stall")(npc)
 						return
 					end
 					if active_looter and st and state_mgr and state_mgr.get_state(npc) == "pickup_crouch" and not item_id then
@@ -4744,7 +4668,6 @@ local function patch_gather_classes(mod)
 				if action_base and action_base.execute then
 					action_base.execute(self)
 				end
-				local now = time_global and time_global() or 0
 				if state_mgr and state_mgr.get_state(npc) == "pickup_crouch" then
 					if st.zhopa2_artifact_force_pickup ~= true
 						and targeted_artifact
@@ -4761,7 +4684,7 @@ local function patch_gather_classes(mod)
 					if now > st.__stimer then
 						st.__stimer = nil
 						if active_selected and not targeted_artifact then
-							zhopa2_gather_item_replacement(nil)(npc)
+							zhopa2_gather_item_replacement(nil, false, "pickup_crouch_delay")(npc)
 						else
 							local fn = (gather_mod() and gather_mod().gather_item) or rawget(_G, "gather_item")
 							if fn then
@@ -4786,7 +4709,7 @@ local function patch_gather_classes(mod)
 						end
 					else
 						if M.zhopa2_gather_stalled(npc, st, item_id, st.vid_pos or item_pos) then
-							zhopa2_gather_item_replacement(nil)(npc)
+							zhopa2_gather_item_replacement(nil, false, "active_stall")(npc)
 							return
 						end
 						if npc:path_type() ~= game_object.level_path then
@@ -4855,6 +4778,7 @@ function M.patch_xr_gather_items()
 	if not mod then
 		return false
 	end
+	M.patch_state_mgr_trade_run()
 	M.patch_method(mod, "on_game_start", PATCH_ID .. "_gather_start", function(original)
 		return function(...)
 			local result = { original(...) }
@@ -5001,6 +4925,26 @@ local function zhopa2_reject_corpse_candidate(mod, st, corpse_id)
 	if mod and type(mod.set_valuable_loot) == "function" then
 		pcall(mod.set_valuable_loot, corpse_id, false)
 	end
+end
+
+function M.zhopa2_reset_corpse_detection_state(st)
+	if not st then
+		return
+	end
+	local corpse_id = tonumber(st.selected_corpse_id)
+	if corpse_id and db and db.storage and db.storage[corpse_id] then
+		db.storage[corpse_id].corpse_already_selected = nil
+	end
+	st.selected_corpse_id = nil
+	st.nearest_id = nil
+	st.nearest_corpse_dist = nil
+	st.nearest_corpse_vertex = nil
+	st.nearest_corpse_position = nil
+	st.vertex_id = nil
+	st.vertex_position = nil
+	st.state = nil
+	st.__stimer = nil
+	st.index = 1
 end
 
 local function zhopa2_corpse_detect_dist_sqr()
@@ -5273,6 +5217,9 @@ local function patch_corpse_classes(mod)
 		M.patch_method(eva, "find_valid_target", PATCH_ID .. "_corpse_find", function(original)
 			return function(self, ...)
 				local npc = self.object
+				if M.zhopa2_trade_gather_blocked(npc, self.a) then
+					return false
+				end
 				if self.a and cleanup_protected_state(self.a) then
 					return false
 				end
@@ -5335,6 +5282,9 @@ local function patch_corpse_classes(mod)
 		M.patch_method(eva, "evaluate", PATCH_ID .. "_corpse_eval", function(original)
 			return function(self, ...)
 				local npc = self.object
+				if M.zhopa2_trade_gather_blocked(npc, self.a) then
+					return false
+				end
 				if not zhopa2_loot_active(npc) then
 					return original(self, ...)
 				end
@@ -5358,6 +5308,9 @@ local function patch_corpse_classes(mod)
 	if action then
 		M.patch_method(action, "execute", PATCH_ID .. "_corpse_execute", function(original)
 			return function(self, ...)
+				if M.zhopa2_trade_gather_blocked(self.object, self.a) then
+					return
+				end
 				if self.a and cleanup_protected_state(self.a) then
 					return
 				end
@@ -5429,6 +5382,7 @@ function M.ensure_all(reason)
 	local prev_patch_reason = current_patch_reason
 	current_patch_reason = reason
 	M.ensure_zhopa_modules()
+	M.patch_state_mgr_trade_run()
 	for i = 1, #ZHOPA2_RUNTIME_PATCHES do
 		run_runtime_patch(ZHOPA2_RUNTIME_PATCHES[i])
 	end

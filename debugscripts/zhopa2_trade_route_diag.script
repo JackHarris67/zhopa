@@ -652,8 +652,8 @@ local function trade_state_watch_info(npc)
 		watched_trade_npcs[npc_id] = nil
 		watched = nil
 	end
-	if st and (st.zhopa2_trade_squad_id or st.zhopa2_trade_trader_id or st.zhopa2_trade_smart_id or st.zhopa2_trade_force_job_section or st.zhopa2_trade_member_ids) then
-		return npc_id, st, watched or { role = "storage", squad_id = st.zhopa2_trade_squad_id, trader_id = st.zhopa2_trade_trader_id }
+	if st and (st.zhopa2_trade_squad_id or st.zhopa2_trade_smart_id or st.zhopa2_trade_force_job_section or st.zhopa2_trade_member_ids) then
+		return npc_id, st, watched or { role = "storage", squad_id = st.zhopa2_trade_squad_id }
 	end
 	if watched then
 		return npc_id, st, watched
@@ -736,31 +736,19 @@ local function provider_role(job, smart)
 	if contains_plain(suitable, "npc_has_items_to_sell") or contains_plain(suitable, "npc_has_tech_items") then
 		return nil
 	end
-	if contains_plain(suitable, "check_npc_trader") or contains_plain(suitable, "check_npc_barman") or contains_plain(suitable, "check_npc_medic") then
+	if contains_plain(suitable, "check_npc_trader") or contains_plain(suitable, "check_npc_barman") then
 		return "trader"
-	end
-	if contains_plain(suitable, "check_npc_mechanic") then
-		return "tech"
 	end
 	level_spot = lower_text(level_spot)
-	if level_spot == "trader" or level_spot == "barman" or level_spot == "medic" then
+	if level_spot == "trader" or level_spot == "barman" then
 		return "trader"
 	end
-	if level_spot == "mechanic" then
-		return "tech"
-	end
 	if type(trade) == "string" then
-		if contains_plain(section, "mechanic") or contains_plain(section, "_tech") then
-			return "tech"
-		end
-		if contains_plain(section, "trader") or contains_plain(section, "barman") or contains_plain(section, "medic") then
+		if contains_plain(section, "trader") or contains_plain(section, "barman") then
 			return "trader"
 		end
 	end
-	if contains_plain(section, "mechanic") or contains_plain(section, "_tech") then
-		return "tech"
-	end
-	if contains_plain(section, "trader") or contains_plain(section, "barman") or contains_plain(section, "medic") then
+	if contains_plain(section, "trader") or contains_plain(section, "barman") then
 		return "trader"
 	end
 	return nil
@@ -815,20 +803,22 @@ local function first_trade_provider_diag(smart, ignore_ids)
 end
 
 local function binding_state()
-	local economy = safe_mod("zhopa2_economy")
 	local sell = xr_effects and xr_effects.trade_job_sell_items or nil
 	local give = xr_effects and xr_effects.trade_job_give_id or nil
 	local has = xr_conditions and xr_conditions.npc_has_items_to_sell or nil
 	return string.format(
-		"sell_economy=%s give_economy=%s has_economy=%s sell_diag=%s give_diag=%s sell_inner_economy=%s give_inner_economy=%s effect_wrapped=%s",
-		tostring(economy and sell == economy.trade_job_sell_items),
-		tostring(economy and give == economy.trade_job_give_id),
-		tostring(economy and has == economy.npc_has_items_to_sell),
+		"sell_present=%s give_present=%s has_present=%s sell_diag=%s give_diag=%s sell_inner_present=%s give_inner_present=%s effect_wrapped=%s sell_type=%s give_type=%s has_type=%s",
+		tostring(type(sell) == "function"),
+		tostring(type(give) == "function"),
+		tostring(type(has) == "function"),
 		tostring(sell == M.trade_job_sell_items_diag_wrapper),
 		tostring(give == M.trade_job_give_id_diag_wrapper),
-		tostring(economy and effect_inner.sell == economy.trade_job_sell_items),
-		tostring(economy and effect_inner.give == economy.trade_job_give_id),
-		tostring(effect_wrappers_installed == true)
+		tostring(type(effect_inner.sell) == "function"),
+		tostring(type(effect_inner.give) == "function"),
+		tostring(effect_wrappers_installed == true),
+		tostring(type(sell)),
+		tostring(type(give)),
+		tostring(type(has))
 	)
 end
 
@@ -853,12 +843,11 @@ local function unwrap_effect_wrappers()
 end
 
 function M.trade_job_sell_items_diag_wrapper(actor, npc, params)
-	local economy = safe_mod("zhopa2_economy")
 	priority_log(
-		"effect_enter name [trade_job_sell_items] npc [%s:%s] inner_is_economy [%s] params [%s:%s] binding [%s]",
+		"effect_enter name [trade_job_sell_items] npc [%s:%s] inner_present [%s] params [%s:%s] binding [%s]",
 		tostring(object_name(npc) or "-"),
 		tostring(object_id(npc) or "-"),
-		tostring(economy and effect_inner.sell == economy.trade_job_sell_items),
+		tostring(type(effect_inner.sell) == "function"),
 		tostring(params and params[1] or "-"),
 		tostring(params and params[2] or "-"),
 		binding_state()
@@ -869,12 +858,11 @@ function M.trade_job_sell_items_diag_wrapper(actor, npc, params)
 end
 
 function M.trade_job_give_id_diag_wrapper(actor, npc, params)
-	local economy = safe_mod("zhopa2_economy")
 	priority_log(
-		"effect_enter name [trade_job_give_id] npc [%s:%s] inner_is_economy [%s] params [%s:%s] binding [%s]",
+		"effect_enter name [trade_job_give_id] npc [%s:%s] inner_present [%s] params [%s:%s] binding [%s]",
 		tostring(object_name(npc) or "-"),
 		tostring(object_id(npc) or "-"),
-		tostring(economy and effect_inner.give == economy.trade_job_give_id),
+		tostring(type(effect_inner.give) == "function"),
 		tostring(params and params[1] or "-"),
 		tostring(params and params[2] or "-"),
 		binding_state()
@@ -963,7 +951,7 @@ local function dump_prepared_snapshot(squad, stage, reason)
 		tostring(squad.zhopa2_trade_detail or "-")
 	)
 	priority_log(
-		"prepared_npc stage [%s] npc [%s:%s] online [%s] storage [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_left [%s] trader_id [%s] member_ids [%s]",
+		"prepared_npc stage [%s] npc [%s:%s] online [%s] storage [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] forced_job [%s] force_left [%s] legacy_trader [%s] member_ids [%s]",
 		tostring(stage or "-"),
 		tostring(object_name(npc) or "-"),
 		tostring(npc_id or "-"),
@@ -1247,7 +1235,7 @@ local function dump_trade_intent_snapshot(squad, stage, reason, result_reason)
 		tostring(info and info.begin_job or "-")
 	)
 	priority_log(
-		"trade_intent_state stage [%s] npc [%s:%s] storage [%s] has_items [%s] trade_items [%s] st_trader [%s] st_smart [%s] st_squad [%s] force_job [%s] force_left [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] beh_path [%s] beh_target [%s] beh_behavior [%s] beh_reached [%s] patrol_info [%s] member_ids [%s]",
+		"trade_intent_state stage [%s] npc [%s:%s] storage [%s] has_items [%s] trade_items [%s] legacy_trader [%s] st_smart [%s] st_squad [%s] force_job [%s] force_left [%s] section_logic [%s] active_section [%s] active_scheme [%s] state [%s] action [%s] point [%s] path [%s] beh_path [%s] beh_target [%s] beh_behavior [%s] beh_reached [%s] patrol_info [%s] member_ids [%s]",
 		tostring(stage or "-"),
 		tostring(object_name(npc) or "-"),
 		tostring(npc_id or "-"),

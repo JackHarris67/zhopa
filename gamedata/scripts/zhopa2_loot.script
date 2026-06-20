@@ -45,6 +45,10 @@ local function index_mod()
 	return load_module("zhopa2_index")
 end
 
+local function complete_pickup_recovery(npc_or_id, request, reason)
+	return true
+end
+
 local function cfg_bool(key, default)
 	local cfg = cfg_mod()
 	if cfg and type(cfg.get_bool) == "function" then
@@ -471,7 +475,20 @@ local function managed_stalker_squad_for_looter(npc, require_loot_enabled)
 	return squad
 end
 
+function M.trade_context_active(npc)
+	local npc_id = object_id(npc)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	return st
+		and st.has_items_to_sell == true
+		and st.zhopa2_trade_squad_id ~= nil
+		and st.zhopa2_trade_smart_id ~= nil
+		or false
+end
+
 function M.should_manage_looter(npc)
+	if M.trade_context_active(npc) then
+		return false
+	end
 	return managed_stalker_squad_for_looter(npc, true) ~= nil
 end
 
@@ -1534,7 +1551,10 @@ local function remove_event(kind, id)
 	if not (store and id) then
 		return
 	end
-	store.seen[id] = nil
+	if store.seen[id] ~= nil then
+		store.seen[id] = nil
+		compact_store(store)
+	end
 end
 
 local function recent_ids(kind)
@@ -1606,7 +1626,11 @@ end
 function M.has_recent_item_events()
 	cleanup_store(STORE_ITEM)
 	local store = event_stores.item
-	return store ~= nil and #store.ids >= (tonumber(store.head) or 1)
+	return store ~= nil and next(store.seen) ~= nil
+end
+
+function M.consume_item_event_id(id)
+	remove_event(STORE_ITEM, id)
 end
 
 function M.is_recent_item_id(id)
@@ -1731,6 +1755,9 @@ function M.request_item_pickup(npc, item_id, reason)
 	if not (valid_id(npc_id) and valid_id(item_id)) then
 		return false, "request_bad_ids"
 	end
+	if M.trade_context_active(npc) then
+		return false, "request_trade_active"
+	end
 	local squad = managed_stalker_squad_for_looter(npc, false)
 	if not squad then
 		return false, "request_bad_looter"
@@ -1780,6 +1807,9 @@ function M.targeted_item_ids_for_npc(npc)
 	if not valid_id(npc_id) then
 		return nil
 	end
+	if M.trade_context_active(npc) then
+		return nil
+	end
 	cleanup_targeted_item_requests()
 	local request = targeted_item_requests[npc_id]
 	if not (request and valid_id(request.item_id)) then
@@ -1796,6 +1826,7 @@ function M.cancel_item_pickup(npc_or_id, item_id)
 		local request = targeted_item_requests[npc_id]
 		if request and request.item_id then
 			targeted_item_requests_by_item[request.item_id] = nil
+			complete_pickup_recovery(npc or npc_id, request, "request_cancel")
 			if type(clear) == "function" and npc then
 				pcall(clear, npc, request.item_id, "request_cancel")
 			end
@@ -1803,6 +1834,10 @@ function M.cancel_item_pickup(npc_or_id, item_id)
 		targeted_item_requests[npc_id] = nil
 	end
 	if valid_id(item_id) then
+		local request = targeted_item_requests_by_item[item_id]
+		if request then
+			complete_pickup_recovery(npc or npc_id, request, "request_cancel")
+		end
 		forget_targeted_item_request(item_id)
 		if type(clear) == "function" and npc then
 			pcall(clear, npc, item_id, "request_cancel")
@@ -1970,6 +2005,7 @@ local function record_targeted_artifact_pickup(npc, item, request, reason)
 	if not mark_artifact_cargo_for_squad(squad, item, section, amount, source_id, reason or request.reason or "artifact_pickup") then
 		return false
 	end
+	complete_pickup_recovery(npc, request, reason or "targeted_artifact_pickup")
 	forget_targeted_item_request(object_id(item))
 	return true
 end
@@ -1999,6 +2035,7 @@ local function record_task_artifact_pickup_by_section(npc, item, request, reason
 	if not mark_artifact_cargo_for_squad(squad, item, request.section, item_cost(item), artifact_id, reason or "artifact_vanilla_item_take") then
 		return false
 	end
+	complete_pickup_recovery(npc, request, reason or "artifact_vanilla_item_take")
 	forget_targeted_item_request(artifact_id)
 	vanilla_artifact_pickups[request.npc_id or object_id(npc)] = nil
 	return true
@@ -2268,7 +2305,9 @@ local function on_item_take(npc, item)
 		local request = targeted_request_for_item(item, true)
 		local vanilla_request = vanilla_artifact_pickups[object_id(npc)]
 		if request then
-			record_targeted_artifact_pickup(npc, item, request, "artifact_item_take")
+			if not record_targeted_artifact_pickup(npc, item, request, "artifact_item_take") then
+				complete_pickup_recovery(npc, request, "artifact_item_take_unrecorded")
+			end
 		elseif vanilla_request and object_is_artifact(item) then
 			record_task_artifact_pickup_by_section(npc, item, vanilla_request, "artifact_vanilla_item_take")
 		elseif object_is_artifact(item) then
