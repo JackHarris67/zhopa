@@ -1,0 +1,605 @@
+local M = {}
+
+-- Copy this file to gamedata/scripts only for focused live trade-stall diagnostics.
+local AUTO_INSTALL_ENABLED = true
+local TRACE_DURATION_MS = 90000
+local TRACE_INTERVAL_MS = 5000
+local PREPARED_SCAN_INTERVAL_MS = 5000
+local TRACE_LIMIT_PER_TICK = 6
+local MAX_LOG_LINES = 360
+local REQUIRE_DEBUG_HUD = true
+
+local installed = false
+local scheduled = false
+local next_trace_tg = 0
+local next_prepared_scan_tg = 0
+local traces = {}
+local log_lines = 0
+local original_try_auto_trade = nil
+local original_try_auto_trade_npc = nil
+local wrapper_guard = false
+
+local function safe_mod(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg_mod()
+	return safe_mod("zhopa2_cfg")
+end
+
+local function debug_print_enabled()
+	if REQUIRE_DEBUG_HUD ~= true then
+		return true
+	end
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if log_lines >= MAX_LOG_LINES then
+		return
+	end
+	log_lines = log_lines + 1
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 trade live diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 trade live diag | " .. fmt, ...))
+	end
+end
+
+local function tg()
+	return type(time_global) == "function" and time_global() or 0
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return false, nil
+	end
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result, extra = pcall(fn, obj, ...)
+	return ok, result, extra
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" or type(obj) == "string" then
+		return tonumber(obj)
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return tonumber(id) or id
+	end
+	ok, id = safe_call(obj, "id")
+	return ok and (tonumber(id) or id) or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "name")
+	if ok and name ~= nil then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "section_name")
+	return ok and name and tostring(name) or nil
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	local ok, section = safe_call(obj, "section")
+	if ok and section ~= nil then
+		return tostring(section)
+	end
+	ok, section = safe_call(obj, "section_name")
+	if ok and section ~= nil then
+		return tostring(section)
+	end
+	ok, section = safe_field(obj, "section")
+	if ok and section ~= nil and type(section) ~= "function" then
+		return tostring(section)
+	end
+	ok, section = safe_field(obj, "section_name")
+	return ok and section and tostring(section) or nil
+end
+
+local function object_label(obj_or_id)
+	local id = object_id(obj_or_id)
+	local obj = obj_or_id
+	if (type(obj_or_id) == "number" or type(obj_or_id) == "string") and id then
+		obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	end
+	return tostring(object_name(obj) or object_section(obj) or "-") .. ":" .. tostring(id or "-")
+end
+
+local function bool_text(value)
+	if value == true then
+		return "true"
+	elseif value == false then
+		return "false"
+	end
+	return tostring(value)
+end
+
+local function table_count(t)
+	if type(t) ~= "table" then
+		return 0
+	end
+	local count = 0
+	for _ in pairs(t) do
+		count = count + 1
+	end
+	return count
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function server_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = safe_alife_object(id)
+	if obj then
+		return obj
+	end
+	if alife and type(alife) == "function" then
+		local ok_sim, sim = pcall(alife)
+		if ok_sim and sim and type(sim.object) == "function" then
+			local ok_obj, value = pcall(sim.object, sim, id)
+			if ok_obj then
+				return value
+			end
+		end
+	end
+	return nil
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if obj then
+		return obj
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, value = pcall(level.object_by_id, id)
+		if ok then
+			return value
+		end
+	end
+	return nil
+end
+
+local function smart_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local smart = SIMBOARD and SIMBOARD.smarts_by_id and SIMBOARD.smarts_by_id[id] or nil
+	if smart then
+		return smart
+	end
+	local entry = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[id] or nil
+	if type(entry) == "table" then
+		return entry.smrt or entry.smart or entry
+	end
+	return entry or server_object_by_id(id)
+end
+
+local function smart_for_npc(npc_or_id)
+	local npc_id = object_id(npc_or_id)
+	local npc = type(npc_or_id) ~= "number" and type(npc_or_id) ~= "string" and npc_or_id or online_object_by_id(npc_id)
+	if npc and xr_gulag and type(xr_gulag.get_npc_smart) == "function" then
+		local ok, smart = pcall(xr_gulag.get_npc_smart, npc)
+		if ok and smart then
+			return smart
+		end
+	end
+	local se_obj = server_object_by_id(npc_id)
+	local group_id = tonumber(se_obj and se_obj.group_id)
+	local squad = group_id and group_id > 0 and group_id < 65535 and server_object_by_id(group_id) or nil
+	local smart_id = tonumber(squad and squad.smart_id)
+		or tonumber(squad and squad.current_target_id)
+		or tonumber(squad and squad.assigned_target_id)
+	return smart_by_id(smart_id)
+end
+
+local function squad_for_npc_id(npc_id)
+	local se_obj = server_object_by_id(npc_id)
+	local group_id = tonumber(se_obj and se_obj.group_id)
+	if group_id and group_id > 0 and group_id < 65535 then
+		return server_object_by_id(group_id)
+	end
+	return nil
+end
+
+local function object_position_text(obj)
+	if obj and type(obj.position) == "function" then
+		local ok, pos = pcall(obj.position, obj)
+		if ok and pos then
+			return string.format("%.2f,%.2f,%.2f", tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+		end
+	end
+	return "-"
+end
+
+local function vector_text(pos)
+	if not pos then
+		return "-"
+	end
+	return string.format("%.2f,%.2f,%.2f", tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+end
+
+local function load_saved_value(npc, key)
+	if not (npc and key and type(load_var) == "function") then
+		return nil
+	end
+	local ok, value = pcall(load_var, npc, key, nil)
+	return ok and value or nil
+end
+
+local function current_state(npc)
+	local st = npc and state_mgr and state_mgr.get_state and state_mgr.get_state(npc) or nil
+	return st
+end
+
+local function current_action_id(npc)
+	local ok, value = safe_call(npc, "action_id")
+	return ok and value or nil
+end
+
+local function current_point_index(npc)
+	local ok, value = safe_call(npc, "point_index")
+	return ok and value or nil
+end
+
+local function has_info(npc, info)
+	if not (npc and info and type(npc.has_info) == "function") then
+		return nil
+	end
+	local ok, value = pcall(npc.has_info, npc, info)
+	return ok and value or nil
+end
+
+local function beh_trace_text(st)
+	local beh = st and st.beh
+	if type(beh) ~= "table" then
+		return "beh=-"
+	end
+	local target = beh.desired_target
+	local target_text = "-"
+	if type(target) == "table" then
+		target_text = string.format(
+			"idx=%s lvid=%s pos=%s sig=%s delay=%s keep=%s active=%s",
+			tostring(target.index or "-"),
+			tostring(target.level_vertex_id or "-"),
+			vector_text(target.position),
+			tostring(target.sig or "-"),
+			tostring(target.delay or "-"),
+			tostring(target.__keep_until or "-"),
+			tostring(target.active_section or "-")
+		)
+	end
+	return string.format(
+		"beh.path=%s saved=%s patrol=%s reached=%s wait=%s target=%s behavior=%s last=%s assist=%s target_data=[%s]",
+		tostring(beh.path_index or "-"),
+		tostring(st and st.object and load_saved_value(st.object, "path_index") or "-"),
+		bool_text(st and st.object and has_info(st.object, "npcx_beh_patrol_mode")),
+		bool_text(beh.am_i_reached),
+		tostring(beh.wait_delay or "-"),
+		tostring(beh.target or "-"),
+		tostring(beh.behavior or "-"),
+		tostring(beh.last_behavior or "-"),
+		tostring(beh.assist_point or "-"),
+		target_text
+	)
+end
+
+local function smart_brief(smart)
+	return tostring(object_name(smart) or object_section(smart) or "-") .. ":" .. tostring(object_id(smart) or "-")
+end
+
+local function owner_for_job(smart, section)
+	if not (smart and type(smart.npc_by_job_section) == "table" and section) then
+		return nil
+	end
+	return smart.npc_by_job_section[section]
+end
+
+local function trace_key(npc_id, squad_id)
+	return tostring(npc_id or "-") .. "|" .. tostring(squad_id or "-")
+end
+
+function M.watch_npc(npc_or_id, ctx)
+	ctx = ctx or {}
+	local npc_id = object_id(npc_or_id)
+	if not npc_id then
+		return false, "missing_npc"
+	end
+	local now = tg()
+	local squad = ctx.squad or squad_for_npc_id(npc_id)
+	local squad_id = tonumber(ctx.squad_id) or object_id(squad)
+	local key = trace_key(npc_id, squad_id)
+	traces[key] = {
+		npc_id = npc_id,
+		squad_id = squad_id,
+		started = now,
+		next_log = now,
+		deadline = now + (tonumber(ctx.duration_ms) or TRACE_DURATION_MS),
+		interval_ms = tonumber(ctx.interval_ms) or TRACE_INTERVAL_MS,
+		source = tostring(ctx.source or "-"),
+		reason = tostring(ctx.reason or "-"),
+		result = tostring(ctx.result or "-"),
+	}
+	return true, "watching"
+end
+
+local function watch_prepared_squad(squad, source)
+	if not squad then
+		return
+	end
+	local npc_id = tonumber(squad.zhopa2_trade_prepared_npc_id)
+	if not npc_id then
+		return
+	end
+	M.watch_npc(npc_id, {
+		squad = squad,
+		squad_id = object_id(squad),
+		source = source or "prepared_scan",
+		reason = squad.zhopa2_trade_prepared_reason or squad.zhopa2_last_trade_reason,
+		result = squad.zhopa2_last_trade_result,
+	})
+end
+
+local function trace_state(entry, now)
+	local npc_id = tonumber(entry.npc_id)
+	local npc = online_object_by_id(npc_id)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	local smart = smart_by_id(st and st.zhopa2_trade_smart_id) or smart_for_npc(npc_id)
+	local info = smart and smart.npc_info and npc_id and smart.npc_info[npc_id] or nil
+	local job = info and info.job or nil
+	local squad = entry.squad_id and server_object_by_id(entry.squad_id) or squad_for_npc_id(npc_id)
+	local se_obj = server_object_by_id(npc_id)
+	local expected_job = st and st.zhopa2_trade_job_section or squad and squad.zhopa2_trade_prepared_job_section or "-"
+	local current_job = job and job.section or "-"
+	local owner = owner_for_job(smart, current_job)
+	local seller_id = job and job.seller_id or nil
+	local force_left = "-"
+	if st and st.zhopa2_trade_force_until ~= nil then
+		local until_tg = tonumber(st.zhopa2_trade_force_until)
+		force_left = until_tg and tostring(until_tg - now) or tostring(st.zhopa2_trade_force_until)
+	end
+	local prepared_left = "-"
+	if squad and squad.zhopa2_trade_prepared_until ~= nil then
+		local until_tg = tonumber(squad.zhopa2_trade_prepared_until)
+		prepared_left = until_tg and tostring(until_tg - now) or tostring(squad.zhopa2_trade_prepared_until)
+	end
+	log(
+		"watch npc [%s] online [%s] alive [%s] pos [%s] vertex [%s] squad [%s:%s] task [%s] result [%s] reason [%s] smart [%s] squad_smart [%s] target [%s] job [%s] expected_job [%s] owner [%s] begin [%s] need [%s] index [%s] seller [%s] st_has [%s] trade_items [%s] force_job [%s] force_left [%s] prepared_left [%s] active [%s] scheme [%s] state [%s] action [%s] point [%s] path [%s] offline_keys [%s] source [%s]",
+		object_label(npc or npc_id),
+		bool_text(npc ~= nil),
+		bool_text(npc and type(npc.alive) == "function" and npc:alive() or nil),
+		object_position_text(npc),
+		tostring(se_obj and se_obj.m_level_vertex_id or "-"),
+		tostring(object_name(squad) or "-"),
+		tostring(entry.squad_id or object_id(squad) or "-"),
+		tostring(squad and squad.zhopa2_task or "-"),
+		tostring(squad and squad.zhopa2_last_trade_result or entry.result or "-"),
+		tostring(squad and (squad.zhopa2_trade_prepared_reason or squad.zhopa2_last_trade_reason) or entry.reason or "-"),
+		smart_brief(smart),
+		tostring(squad and squad.smart_id or "-"),
+		tostring(squad and (squad.current_target_id or squad.assigned_target_id) or "-"),
+		tostring(current_job),
+		tostring(expected_job),
+		tostring(owner or "-"),
+		tostring(info and info.begin_job or "-"),
+		tostring(info and info.need_job or "-"),
+		tostring(info and info.current_index or "-"),
+		tostring(seller_id or "-"),
+		bool_text(st and st.has_items_to_sell),
+		tostring(table_count(st and st.trade_items)),
+		tostring(st and st.zhopa2_trade_force_job_section or "-"),
+		tostring(force_left),
+		tostring(prepared_left),
+		tostring(st and st.active_section or "-"),
+		tostring(st and st.active_scheme or "-"),
+		tostring(current_state(npc) or "-"),
+		tostring(current_action_id(npc) or "-"),
+		tostring(current_point_index(npc) or "-"),
+		tostring(load_saved_value(npc, "path_index") or "-"),
+		tostring(table_count(db and db.offline_objects and db.offline_objects[npc_id])),
+		tostring(entry.source or "-")
+	)
+	log("beh npc [%s] %s", object_label(npc or npc_id), beh_trace_text(st))
+end
+
+local function scan_prepared_squads()
+	local board = rawget(_G, "SIMBOARD")
+	if not (board and board.squads) then
+		return
+	end
+	for squad_id, stored in pairs(board.squads) do
+		local squad = nil
+		if type(stored) == "table" then
+			squad = stored.squad or stored.object or stored
+		else
+			squad = server_object_by_id(squad_id)
+		end
+		if squad and (squad.zhopa2_last_trade_result == "trade_prepared" or squad.zhopa2_trade_prepared_npc_id ~= nil) then
+			watch_prepared_squad(squad, "prepared_scan")
+		end
+	end
+end
+
+function M.install()
+	if installed then
+		return true, "already_installed"
+	end
+	local economy = safe_mod("zhopa2_economy")
+	if not economy then
+		return false, "economy_missing"
+	end
+	if type(economy.try_auto_trade) == "function" and not economy.zhopa2_trade_live_diag_original_try_auto_trade then
+		original_try_auto_trade = economy.try_auto_trade
+		economy.zhopa2_trade_live_diag_original_try_auto_trade = original_try_auto_trade
+		economy.try_auto_trade = function(squad, reason, opts, ...)
+			if wrapper_guard then
+				return original_try_auto_trade(squad, reason, opts, ...)
+			end
+			wrapper_guard = true
+			local result = { original_try_auto_trade(squad, reason, opts, ...) }
+			wrapper_guard = false
+			if squad and (result[2] == "trade_prepared" or squad.zhopa2_last_trade_result == "trade_prepared" or squad.zhopa2_trade_prepared_npc_id ~= nil) then
+				watch_prepared_squad(squad, "try_auto_trade:" .. tostring(reason or "-"))
+			end
+			return unpack(result)
+		end
+	end
+	if type(economy.try_auto_trade_npc) == "function" and not economy.zhopa2_trade_live_diag_original_try_auto_trade_npc then
+		original_try_auto_trade_npc = economy.try_auto_trade_npc
+		economy.zhopa2_trade_live_diag_original_try_auto_trade_npc = original_try_auto_trade_npc
+		economy.try_auto_trade_npc = function(npc, trader, reason, opts, ...)
+			if wrapper_guard then
+				return original_try_auto_trade_npc(npc, trader, reason, opts, ...)
+			end
+			wrapper_guard = true
+			local result = { original_try_auto_trade_npc(npc, trader, reason, opts, ...) }
+			wrapper_guard = false
+			M.watch_npc(npc, {
+				source = "try_auto_trade_npc:" .. tostring(reason or "-"),
+				reason = reason,
+				result = result[2],
+			})
+			return unpack(result)
+		end
+	end
+	installed = true
+	log("installed interval [%s] duration [%s]", tostring(TRACE_INTERVAL_MS), tostring(TRACE_DURATION_MS))
+	return true, "installed"
+end
+
+function M.uninstall()
+	local economy = safe_mod("zhopa2_economy")
+	if economy and original_try_auto_trade then
+		economy.try_auto_trade = original_try_auto_trade
+		economy.zhopa2_trade_live_diag_original_try_auto_trade = nil
+	end
+	if economy and original_try_auto_trade_npc then
+		economy.try_auto_trade_npc = original_try_auto_trade_npc
+		economy.zhopa2_trade_live_diag_original_try_auto_trade_npc = nil
+	end
+	original_try_auto_trade = nil
+	original_try_auto_trade_npc = nil
+	installed = false
+	traces = {}
+	return true
+end
+
+function M.actor_on_update()
+	local now = tg()
+	if installed ~= true then
+		M.install()
+	end
+	if now >= next_prepared_scan_tg then
+		next_prepared_scan_tg = now + PREPARED_SCAN_INTERVAL_MS
+		scan_prepared_squads()
+	end
+	if next(traces) == nil or now < next_trace_tg then
+		return
+	end
+	next_trace_tg = now + 1000
+	local processed = 0
+	for key, entry in pairs(traces) do
+		if now >= tonumber(entry.deadline or 0) then
+			traces[key] = nil
+		elseif now >= tonumber(entry.next_log or 0) then
+			entry.next_log = now + (tonumber(entry.interval_ms) or TRACE_INTERVAL_MS)
+			trace_state(entry, now)
+			processed = processed + 1
+			if processed >= TRACE_LIMIT_PER_TICK then
+				break
+			end
+		end
+	end
+end
+
+function M.actor_on_first_update()
+	if scheduled then
+		return
+	end
+	scheduled = true
+	if AUTO_INSTALL_ENABLED then
+		M.install()
+	end
+	if RegisterScriptCallback then
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_update()
+	return M.actor_on_update()
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_trade_live_state_diag = M
+
+return M

@@ -681,6 +681,7 @@ local function rest_trade_result_is_final(result)
 		or result == "economy_missing"
 		or result == "executor_error"
 		or result == "missing_pair"
+		or (type(result) == "string" and string.find(result, "trade_prepared_cancel_", 1, true) == 1)
 end
 
 local function sync_rest_trade_done_from_economy(squad)
@@ -719,6 +720,18 @@ local function try_auto_trade_at_rest_smart(squad, reason)
 		squad.zhopa2_last_reason = result
 	end
 	return ok and traded == true, ok and result or "trade_error"
+end
+
+local function recover_prepared_trade_if_any(squad, reason)
+	if not (squad and squad.zhopa2_last_trade_result == "trade_prepared") then
+		return false, nil
+	end
+	local economy = economy_mod()
+	if not (economy and type(economy.recover_prepared_trade) == "function") then
+		return false, "economy_missing"
+	end
+	local ok, recovered, result = pcall(economy.recover_prepared_trade, squad, reason or "task_update")
+	return ok and recovered == true, ok and result or "trade_recover_error"
 end
 
 local function tick_rest_auto_trade(squad)
@@ -2414,6 +2427,8 @@ function M.update_squad(squad, memory)
 		end
 		return false
 	end
+
+	recover_prepared_trade_if_any(squad, "task_update")
 
 	if pause_for_surge(squad) then
 		return false

@@ -6,6 +6,8 @@ local C = {
 	SMART_TRADE_QUEUE_SLOT_MS = 60000,
 	TRADE_PREPARED_TIMEOUT_MS = 75000,
 	TRADE_FORCE_JOB_PAD_MS = 15000,
+	TRADE_PATHPOINT_CLEAR_COUNT = 12,
+	TRADE_PATH_VERTEX_SEARCH_MAX_DIST = 90,
 	TRADE_POST_RELEASE_WATCH_MS = 20000,
 	TRADE_POST_RELEASE_WATCH_INTERVAL_MS = 2000,
 	OFFLINE_TRADE_PROFILE_CACHE_TTL_MS = 2000,
@@ -47,6 +49,7 @@ local JOB_ROLE_CACHE = {}
 local SMART_TRADE_PROVIDER_CACHE = {}
 local SMART_TRADE_CUSTOMER_CACHE = {}
 local SMART_TRADE_QUEUE = {}
+local SMART_TRADE_PRIORITY_BOOSTS = {}
 local trade_path = {}
 trade_path.session_banned_npcs = {}
 trade_path.offline_profile_cache = {}
@@ -278,6 +281,13 @@ local function print_trade_error(fmt, ...)
 			return
 		end
 	else
+		return
+	end
+	pcall(printf, fmt, ...)
+end
+
+local function print_trade_debug(fmt, ...)
+	if not debug_print_enabled() or type(printf) ~= "function" then
 		return
 	end
 	pcall(printf, fmt, ...)
@@ -2251,6 +2261,8 @@ function trade_path.clear_trade_storage(st)
 	st.zhopa2_trade_force_job_section = nil
 	st.zhopa2_trade_force_until = nil
 	st.zhopa2_trade_trader_id = nil
+	st.zhopa2_trade_job_section = nil
+	st.zhopa2_trade_priority_boosted = nil
 	st.zhopa2_trade_reason = nil
 	st.zhopa2_trade_member_ids = nil
 	if st.trade_items then
@@ -2303,7 +2315,7 @@ local function trade_context_active(st)
 end
 
 local function squad_accepts_managed_trade_signal(squad)
-	return squad and (squad.zhopa2_task == "REST" or squad.zhopa2_task == "BASE_CAMPING" or squad.zhopa2_task == "TRADE")
+	return squad and (squad.zhopa2_task == "REST" or squad.zhopa2_task == "NIGHT_REST" or squad.zhopa2_task == "BASE_CAMPING" or squad.zhopa2_task == "TRADE")
 end
 
 local function squad_for_online_npc(npc)
@@ -2439,6 +2451,7 @@ local function trade_result_terminal(result)
 		or result == "nothing_to_trade"
 		or result == "offline_nothing_to_trade"
 		or result == "trade_prepared_timeout"
+		or (type(result) == "string" and string.find(result, "trade_prepared_cancel_", 1, true) == 1)
 end
 
 local function clear_squad_prepared_trade_state(squad)
@@ -2449,6 +2462,7 @@ local function clear_squad_prepared_trade_state(squad)
 	squad.zhopa2_trade_prepared_npc_id = nil
 	squad.zhopa2_trade_prepared_smart_id = nil
 	squad.zhopa2_trade_prepared_trader_id = nil
+	squad.zhopa2_trade_prepared_job_section = nil
 	squad.zhopa2_trade_prepared_reason = nil
 end
 
@@ -3043,6 +3057,223 @@ local function prepared_trade_matches(squad, npc_id, smart_id)
 	return true
 end
 
+function trade_path.priority_boost_key(smart_id, section)
+	if not (smart_id and type(section) == "string" and section ~= "") then
+		return nil
+	end
+	return tostring(smart_id) .. "|" .. section
+end
+
+function trade_path.job_priority(job)
+	if not job then
+		return nil
+	end
+	if gulag_general and type(gulag_general.get_job_prior) == "function" then
+		local ok, value = pcall(gulag_general.get_job_prior, job)
+		if ok then
+			return tonumber(value)
+		end
+	end
+	if job.exclusive == true then
+		return tonumber(job.prior)
+	end
+	return nil
+end
+
+function trade_path.max_stalker_job_priority(smart)
+	local jobs = smart and smart.stalker_jobs or nil
+	local best = 0
+	if type(jobs) ~= "table" then
+		return best
+	end
+	for i = 1, #jobs do
+		local prior = trade_path.job_priority(jobs[i])
+		if prior and prior > best then
+			best = prior
+		end
+	end
+	return best
+end
+
+function trade_path.selected_trade_customer_section(smart, npc_id, npc_info)
+	if not (smart and npc_id and npc_info and npc_info.job and job_is_trade_customer(npc_info.job, smart)) then
+		return nil, nil
+	end
+	local section = npc_info.job.section
+	if type(section) ~= "string" or section == "" then
+		return nil, nil
+	end
+	local owner = smart.npc_by_job_section and tonumber(smart.npc_by_job_section[section]) or nil
+	if owner ~= tonumber(npc_id) then
+		return nil, nil
+	end
+	return section, npc_info.job
+end
+
+function trade_path.select_trade_customer_job(smart, npc_id, npc_info, stage)
+	if not (smart and npc_id and npc_info and type(smart.select_npc_job) == "function") then
+		return false, nil, "trade_select_unavailable"
+	end
+	local ok, err = pcall(smart.select_npc_job, smart, npc_info, true)
+	if not ok then
+		print_trade_debug("~ ZHOPA2 trade debug | select_failed stage [%s] npc [%s] detail [%s]", tostring(stage or "-"), tostring(npc_id), tostring(err))
+		return false, nil, "trade_select_error"
+	end
+	local section = trade_path.selected_trade_customer_section(smart, npc_id, npc_info)
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | select_result stage [%s] npc [%s] selected [%s] current [%s]",
+		tostring(stage or "-"),
+		tostring(npc_id),
+		tostring(section or "-"),
+		tostring(npc_info.job and npc_info.job.section or "-")
+	)
+	if section then
+		return true, section, "trade_job_selected"
+	end
+	return false, nil, "trade_job_not_selected"
+end
+
+function trade_path.prepare_selected_trade_job_path(npc, smart, section, reason)
+	local npc_id = object_id(npc)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	if not (npc and smart and st and type(section) == "string" and section ~= "") then
+		return false, "missing_trade_path_context"
+	end
+	if st.section_logic ~= section or st.active_scheme ~= "beh" then
+		return false, "trade_logic_not_active:" .. tostring(st.section_logic or "-") .. ":" .. tostring(st.active_section or "-") .. ":" .. tostring(st.active_scheme or "-")
+	end
+	trade_path.reset_beh_trade_entry(npc, st, reason or "trade_selected")
+	local ok_path, path_reason = trade_path.prepare_active(npc, smart, st, nil, true)
+	if ok_path ~= true and not trade_path.acceptable_prepare_result(path_reason) then
+		return false, "trade_path_prepare_failed:" .. tostring(path_reason or "-")
+	end
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | trade_path_prepared npc [%s] smart [%s] job [%s] detail [%s]",
+		tostring(npc_id),
+		tostring(object_id(smart) or "-"),
+		tostring(section),
+		tostring(path_reason or "vanilla")
+	)
+	return true, path_reason or "trade_path_prepared"
+end
+
+function trade_path.apply_trade_priority_boost(smart, job, npc_info, squad, npc_id, reason)
+	local smart_id = object_id(smart)
+	local section = job and job.section
+	local key = trade_path.priority_boost_key(smart_id, section)
+	if not key then
+		return false, "trade_priority_missing_key"
+	end
+	if job.exclusive ~= true then
+		print_trade_debug("~ ZHOPA2 trade debug | priority_boost_rejected reason [not_exclusive] npc [%s] job [%s]", tostring(npc_id or "-"), tostring(section or "-"))
+		return false, "trade_priority_not_boostable"
+	end
+	local old_entry = SMART_TRADE_PRIORITY_BOOSTS[key]
+	if old_entry and old_entry.owner_npc_id ~= npc_id then
+		return false, "trade_priority_boost_busy"
+	end
+	local old_prior = old_entry and old_entry.old_prior or tonumber(job.prior)
+	if old_prior == nil then
+		return false, "trade_priority_missing_old"
+	end
+	local current_prior = trade_path.job_priority(npc_info and npc_info.job) or 0
+	local max_prior = trade_path.max_stalker_job_priority(smart)
+	local new_prior = math.max(old_prior, current_prior, max_prior) + 10
+	SMART_TRADE_PRIORITY_BOOSTS[key] = old_entry or {
+		smart_id = smart_id,
+		section = section,
+		old_prior = old_prior,
+		owner_squad_id = object_id(squad),
+		owner_npc_id = npc_id,
+	}
+	SMART_TRADE_PRIORITY_BOOSTS[key].deadline = tg() + C.TRADE_PREPARED_TIMEOUT_MS + C.TRADE_FORCE_JOB_PAD_MS
+	job.prior = new_prior
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | priority_boost_applied npc [%s] smart [%s] job [%s] old [%s] new [%s] reason [%s]",
+		tostring(npc_id or "-"),
+		tostring(smart_id or "-"),
+		tostring(section or "-"),
+		tostring(old_prior),
+		tostring(new_prior),
+		tostring(reason or "-")
+	)
+	return true, "trade_priority_boosted"
+end
+
+function trade_path.restore_trade_priority_boost(smart, section, reason)
+	local smart_id = object_id(smart)
+	local key = trade_path.priority_boost_key(smart_id, section)
+	local entry = key and SMART_TRADE_PRIORITY_BOOSTS[key] or nil
+	if not entry then
+		return false
+	end
+	local restore_smart = smart or smart_by_id(entry.smart_id)
+	local job = restore_smart and find_smart_job_by_section(restore_smart, entry.section)
+	if job and job.exclusive == true then
+		job.prior = entry.old_prior
+	end
+	SMART_TRADE_PRIORITY_BOOSTS[key] = nil
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | priority_boost_restored smart [%s] job [%s] old [%s] reason [%s]",
+		tostring(entry.smart_id or "-"),
+		tostring(entry.section or "-"),
+		tostring(entry.old_prior),
+		tostring(reason or "-")
+	)
+	return true
+end
+
+function trade_path.restore_trade_priority_boosts(smart_id, squad_id, npc_id, reason)
+	local keys = {}
+	for key, entry in pairs(SMART_TRADE_PRIORITY_BOOSTS) do
+		if (not smart_id or tonumber(entry.smart_id) == tonumber(smart_id))
+			and (not squad_id or tonumber(entry.owner_squad_id) == tonumber(squad_id))
+			and (not npc_id or tonumber(entry.owner_npc_id) == tonumber(npc_id))
+		then
+			keys[#keys + 1] = key
+		end
+	end
+	for i = 1, #keys do
+		local entry = SMART_TRADE_PRIORITY_BOOSTS[keys[i]]
+		if entry then
+			if not trade_path.restore_trade_priority_boost(smart_by_id(entry.smart_id), entry.section, reason) then
+				SMART_TRADE_PRIORITY_BOOSTS[keys[i]] = nil
+			end
+		end
+	end
+end
+
+function trade_path.prepared_trade_cancel_reason(squad, smart_id, npc_id, smart)
+	if not squad_accepts_managed_trade_signal(squad) then
+		return "trade_prepared_cancel_task"
+	end
+	if smart_id and tonumber(squad.smart_id) and tonumber(squad.smart_id) ~= tonumber(smart_id) then
+		return "trade_prepared_cancel_smart"
+	end
+	if not (smart and npc_id) then
+		return nil
+	end
+	local npc = online_object_by_id(npc_id)
+	local runtime_smart = npc and trade_smart_for_npc(npc, nil) or nil
+	local runtime_smart_id = object_id(runtime_smart)
+	if smart_id and runtime_smart_id and runtime_smart_id ~= tonumber(smart_id) then
+		return "trade_prepared_cancel_runtime_smart"
+	end
+	local info = smart.npc_info and smart.npc_info[npc_id] or nil
+	if not info then
+		return "trade_prepared_cancel_no_npc_info"
+	end
+	local st = db and db.storage and db.storage[npc_id] or nil
+	if not trade_context_active(st) then
+		return "trade_prepared_cancel_storage"
+	end
+	local expected = st.zhopa2_trade_job_section or squad.zhopa2_trade_prepared_job_section
+	if expected and (not info.job or info.job.section ~= expected) then
+		return "trade_prepared_cancel_job"
+	end
+	return nil
+end
+
 function trade_path.npc_name(npc)
 	if npc and type(npc.name) == "function" then
 		local ok, value = pcall(npc.name, npc)
@@ -3078,6 +3309,332 @@ function trade_path.save_point(npc, index, value)
 	return pcall(se_save_var, id, name, "pathpoint" .. tostring(index), value) == true
 end
 
+function trade_path.trim(value)
+	return type(value) == "string" and string.match(value, "^%s*(.-)%s*$") or ""
+end
+
+function trade_path.has_patrol_mode(npc)
+	if npc and type(npc.has_info) == "function" then
+		local ok, value = pcall(npc.has_info, npc, "npcx_beh_patrol_mode")
+		return ok and value == true
+	end
+	return false
+end
+
+function trade_path.reset_beh_trade_entry(npc, st, reason)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false
+	end
+	if type(save_var) == "function" then
+		pcall(save_var, npc, "path_index", 1)
+	end
+	if st and st.beh then
+		st.beh.path_index = 1
+		st.beh.am_i_reached = nil
+	end
+	if type(npc.disable_info_portion) == "function" then
+		pcall(npc.disable_info_portion, npc, "npcx_beh_patrol_mode")
+	end
+	for i = 1, C.TRADE_PATHPOINT_CLEAR_COUNT do
+		trade_path.save_point(npc, i, nil)
+	end
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | beh_entry_reset npc [%s] reason [%s] pathpoints [%s]",
+		tostring(npc_id),
+		tostring(reason or "-"),
+		tostring(C.TRADE_PATHPOINT_CLEAR_COUNT)
+	)
+	return true
+end
+
+function trade_path.ini_string(ini, section, field)
+	if not (ini and section and field and type(ini.r_string_ex) == "function") then
+		return nil
+	end
+	local ok, value = pcall(ini.r_string_ex, ini, section, field)
+	return ok and value or nil
+end
+
+function trade_path.parse_pos(line)
+	if type(line) ~= "string" or not vector then
+		return nil
+	end
+	local x, y, z = string.match(line, "pos:%s*([%-%d%.eE]+)%s*,%s*([%-%d%.eE]+)%s*,%s*([%-%d%.eE]+)")
+	x, y, z = tonumber(x), tonumber(y), tonumber(z)
+	if not (x and y and z) then
+		return nil
+	end
+	return vector():set(x, y, z)
+end
+
+function trade_path.object_position(obj)
+	if obj and type(obj.position) == "function" then
+		local ok, pos = pcall(obj.position, obj)
+		if ok and pos then
+			return pos
+		end
+	end
+	return nil
+end
+
+function trade_path.position_accessible(npc, pos)
+	if not (npc and pos and type(npc.accessible) == "function") then
+		return false
+	end
+	local ok, value = pcall(npc.accessible, npc, pos)
+	return ok and value == true
+end
+
+function trade_path.vertex_position(vid)
+	vid = tonumber(vid)
+	if not (vid and vid < 4294967295 and level and type(level.vertex_position) == "function") then
+		return nil
+	end
+	local ok_pos, vertex_pos = pcall(level.vertex_position, vid)
+	return ok_pos and vertex_pos or nil
+end
+
+function trade_path.vertex_accessible(npc, vid)
+	vid = tonumber(vid)
+	if not (npc and vid and vid < 4294967295) then
+		return false
+	end
+	if not trade_path.vertex_position(vid) then
+		return false
+	end
+	if type(npc.accessible) ~= "function" then
+		return true
+	end
+	local ok, value = pcall(npc.accessible, npc, vid)
+	return ok and value == true
+end
+
+function trade_path.direct_accessible_vertex(npc, pos)
+	if not (npc and pos and level and type(level.vertex_id) == "function") then
+		return nil, "missing_vertex_api"
+	end
+	local ok_direct, direct_vid = pcall(level.vertex_id, pos)
+	direct_vid = ok_direct and tonumber(direct_vid) or nil
+	if direct_vid and direct_vid < 4294967295 then
+		if trade_path.position_accessible(npc, pos) then
+			return direct_vid, "direct_pos"
+		end
+		if trade_path.vertex_accessible(npc, direct_vid) then
+			return direct_vid, "direct"
+		end
+	end
+	return nil, "direct_invalid"
+end
+
+function trade_path.direction_accessible_vertex(npc, pos)
+	if not (npc and pos and vector and type(npc.position) == "function" and type(npc.level_vertex_id) == "function" and type(npc.vertex_in_direction) == "function") then
+		return nil, "direction_missing"
+	end
+	local ok_npc_pos, npc_pos = pcall(npc.position, npc)
+	local ok_npc_vid, npc_vid = pcall(npc.level_vertex_id, npc)
+	if not (ok_npc_pos and npc_pos and ok_npc_vid and npc_vid and npc_vid < 4294967295) then
+		return nil, "direction_bad_origin"
+	end
+	local dist = npc_pos.distance_to and npc_pos:distance_to(pos) or nil
+	if not (dist and dist > 0) then
+		return nil, "direction_zero"
+	end
+	local dir = vector():set(pos):sub(npc_pos)
+	local max_dist = math.min(C.TRADE_PATH_VERTEX_SEARCH_MAX_DIST, math.floor(dist) + 5)
+	local best_vid, best_dist
+	for step = 1, max_dist do
+		local ok_vid, vid = pcall(npc.vertex_in_direction, npc, npc_vid, dir, step)
+		vid = ok_vid and tonumber(vid) or nil
+		if vid and trade_path.vertex_accessible(npc, vid) then
+			local vertex_pos = trade_path.vertex_position(vid)
+			local to_target = vertex_pos and vertex_pos.distance_to_sqr and vertex_pos:distance_to_sqr(pos) or nil
+			if to_target and (not best_dist or to_target < best_dist) then
+				best_vid = vid
+				best_dist = to_target
+			end
+		end
+	end
+	if best_vid then
+		return best_vid, "direction"
+	end
+	return nil, "direction_failed"
+end
+
+function trade_path.nearest_accessible_vertex(npc, pos)
+	if not (npc and vector and type(npc.accessible_nearest) == "function") then
+		return nil, "nearest_missing"
+	end
+	if trade_path.position_accessible(npc, pos) then
+		local direct_vid, direct_reason = trade_path.direct_accessible_vertex(npc, pos)
+		if direct_vid then
+			return direct_vid, direct_reason or "already_accessible"
+		end
+		return nil, "accessible_no_vertex"
+	end
+	local out_pos = vector():set(0, 0, 0)
+	local ok_near, near_vid = pcall(function()
+		return npc:accessible_nearest(pos, out_pos)
+	end)
+	if ok_near and trade_path.vertex_accessible(npc, near_vid) then
+		return near_vid, "nearest"
+	end
+	return nil, "nearest_failed"
+end
+
+function trade_path.accessible_vertex(npc, pos, fallback_pos)
+	local direct_vid, direct_reason = trade_path.direct_accessible_vertex(npc, pos)
+	if direct_vid then
+		return direct_vid, direct_reason
+	end
+	local direction_vid, direction_reason = trade_path.direction_accessible_vertex(npc, pos)
+	if direction_vid then
+		return direction_vid, direction_reason
+	end
+	if fallback_pos then
+		local fallback_vid = trade_path.direct_accessible_vertex(npc, fallback_pos)
+		if fallback_vid then
+			return fallback_vid, "trader_direct"
+		end
+		local near_fallback_vid, near_fallback_reason = trade_path.nearest_accessible_vertex(npc, fallback_pos)
+		if near_fallback_vid then
+			return near_fallback_vid, "trader_" .. tostring(near_fallback_reason or "nearest")
+		end
+	end
+	local near_vid, near_reason = trade_path.nearest_accessible_vertex(npc, pos)
+	if near_vid then
+		return near_vid, near_reason
+	end
+	return nil, near_reason or direct_reason or "nearest_failed"
+end
+
+function trade_path.line_head_tail(line)
+	local pipe = string.find(line, "|", 1, true)
+	if not pipe then
+		return trade_path.trim(line), ""
+	end
+	return trade_path.trim(string.sub(line, 1, pipe - 1)), trade_path.trim(string.sub(line, pipe + 1))
+end
+
+function trade_path.head_tokens(head)
+	local out = {}
+	if type(head) ~= "string" then
+		return out
+	end
+	for part in string.gmatch(head, "([^,]+)") do
+		out[#out + 1] = trade_path.trim(part)
+	end
+	return out
+end
+
+function trade_path.drop_pos_tail(tail)
+	if type(tail) ~= "string" or tail == "" then
+		return ""
+	end
+	tail = string.gsub(tail, "pos:%s*[%-%d%.eE]+%s*,%s*[%-%d%.eE]+%s*,%s*[%-%d%.eE]+", "")
+	return trade_path.trim(tail)
+end
+
+function trade_path.rewrite_line(npc, line, fallback_pos, force_override)
+	local pos = trade_path.parse_pos(line)
+	if not pos then
+		return line, false, "no_pos"
+	end
+	if force_override ~= true and trade_path.position_accessible(npc, pos) then
+		return line, false, "vanilla_path_ok"
+	end
+	local vid, reason = trade_path.accessible_vertex(npc, pos, fallback_pos)
+	if not vid then
+		return nil, true, reason or "no_vertex"
+	end
+	if force_override == true then
+		reason = "forced_" .. tostring(reason or "vertex")
+	end
+	local head, tail = trade_path.line_head_tail(line)
+	local tokens = trade_path.head_tokens(head)
+	local delay = tokens[1] ~= nil and tokens[1] ~= "" and tokens[1] or "0"
+	local anim = tokens[2] ~= nil and tokens[2] ~= "" and tokens[2] or nil
+	local rewritten = tostring(vid) .. "," .. tostring(delay)
+	if anim then
+		rewritten = rewritten .. "," .. tostring(anim)
+	end
+	tail = trade_path.drop_pos_tail(tail)
+	if tail ~= "" then
+		rewritten = rewritten .. " | " .. tail
+	end
+	return rewritten, true, reason
+end
+
+function trade_path.prepare(npc, st, ini, fallback_pos, force_override)
+	ini = ini or st and st.ini or nil
+	if not (npc and st and ini and st.active_section and type(se_save_var) == "function") then
+		return false, "missing_context"
+	end
+	trade_path.clear(npc, st)
+	local points = {}
+	local needs_override = false
+	local last_reason = nil
+	for i = 1, 8 do
+		local line = trade_path.ini_string(ini, st.active_section, "pt" .. tostring(i))
+		if not line then
+			break
+		end
+		local rewritten, changed, reason = trade_path.rewrite_line(npc, line, fallback_pos, force_override)
+		if not rewritten then
+			return false, reason or "path_rewrite_failed"
+		end
+		points[#points + 1] = rewritten
+		needs_override = needs_override or changed == true
+		last_reason = reason or last_reason
+	end
+	if not needs_override or #points == 0 then
+		return false, last_reason or "vanilla_path_ok"
+	end
+	local had_patrol = trade_path.has_patrol_mode(npc)
+	for i = 1, #points do
+		trade_path.save_point(npc, i, points[i])
+	end
+	trade_path.save_point(npc, #points + 1, nil)
+	trade_path.set_patrol_mode(npc, true)
+	st.zhopa2_trade_path_override = true
+	st.zhopa2_trade_path_points = #points + 1
+	st.zhopa2_trade_path_had_patrol_mode = had_patrol
+	st.zhopa2_trade_path_reason = last_reason or "nearest"
+	return true, st.zhopa2_trade_path_reason
+end
+
+function trade_path.acceptable_prepare_result(reason)
+	return reason == "vanilla_path_ok" or reason == "no_pos"
+end
+
+function trade_path.prepare_active(npc, smart, st, trader, force_override)
+	local obj = st and st.object or npc
+	local fallback_pos = trade_path.object_position(trader)
+	local ini = st and st.ini or smart and smart.ini or nil
+	local ok_path, path_reason = trade_path.prepare(obj, st, ini, fallback_pos, force_override)
+	if ok_path ~= true and not trade_path.acceptable_prepare_result(path_reason) then
+		print_trade_error(
+			"~ ZHOPA2 trade error | reason [trade_path_prepare_failed] npc [%s:%s] smart [%s:%s] active [%s] detail [%s]",
+			object_name(obj),
+			tostring(object_id(obj) or "-"),
+			object_name(smart),
+			tostring(object_id(smart) or "-"),
+			tostring(st and st.active_section or "-"),
+			tostring(path_reason or "-")
+		)
+		return false, path_reason
+	end
+	if type(st and st.beh) == "table" then
+		st.beh.desired_target = nil
+		st.beh.path_index = 1
+		st.beh.am_i_reached = nil
+	end
+	if obj and type(save_var) == "function" then
+		pcall(save_var, obj, "path_index", 1)
+	end
+	return true, path_reason
+end
+
 function trade_path.clear(npc, st)
 	if not (st and st.zhopa2_trade_path_override == true) then
 		return false
@@ -3105,6 +3662,12 @@ function M.clear_prepared_trade_job(smart, npc_id, reason)
 	if st and st.object then
 		trade_path.clear(st.object, st)
 	end
+	trade_path.restore_trade_priority_boosts(
+		object_id(smart) or tonumber(st and st.zhopa2_trade_smart_id),
+		tonumber(st and st.zhopa2_trade_squad_id),
+		id,
+		reason or "cleared"
+	)
 	trade_path.clear_trade_storage(st)
 	local info = smart and smart.npc_info and smart.npc_info[id] or nil
 	if info and info.job and job_is_trade_customer(info.job, smart) then
@@ -3112,6 +3675,67 @@ function M.clear_prepared_trade_job(smart, npc_id, reason)
 		info.job.idle = tg() + 20000
 	end
 	return true, reason or "cleared"
+end
+
+function trade_path.activate_selected_trade_job(npc, smart, npc_info, section, reason)
+	local npc_id = object_id(npc)
+	if not (npc_id and smart and npc_info and type(section) == "string" and section ~= "") then
+		return false, "missing_trade_job"
+	end
+	local job = find_smart_job_by_section(smart, section) or npc_info.job
+	if not (job and job_is_trade_customer(job, smart)) then
+		return false, "trade_job_not_customer"
+	end
+	local owner = smart.npc_by_job_section and tonumber(smart.npc_by_job_section[section]) or nil
+	if owner and owner ~= tonumber(npc_id) then
+		return false, "trade_slot_busy"
+	end
+	if type(smart.npc_by_job_section) == "table" then
+		for job_section, owner_id in pairs(smart.npc_by_job_section) do
+			if tonumber(owner_id) == tonumber(npc_id) and job_section ~= section then
+				smart.npc_by_job_section[job_section] = nil
+			end
+		end
+		smart.npc_by_job_section[section] = npc_id
+	end
+	job.seller_id = nil
+	npc_info.job = job
+	npc_info.begin_job = true
+	npc_info.need_job = "nil"
+	npc_info.current_index = 1
+
+	local st = db and db.storage and db.storage[npc_id] or nil
+	if db and db.offline_objects and db.offline_objects[npc_id] then
+		clear_table(db.offline_objects[npc_id])
+	end
+	if not (st and st.object) then
+		return true, "trade_job_assigned_offline"
+	end
+	if type(smart.setup_logic) ~= "function" then
+		return false, "trade_setup_logic_missing"
+	end
+
+	trade_path.clear(st.object, st)
+	trade_path.reset_beh_trade_entry(st.object, st, reason or "trade_job_activate")
+	local ok_setup, setup_err = pcall(smart.setup_logic, smart, st.object)
+	if not ok_setup then
+		return false, "trade_setup_logic_error:" .. tostring(setup_err)
+	end
+	if not (st.section_logic == section and st.active_scheme ~= nil) then
+		return false, "trade_logic_not_active:" .. tostring(st.section_logic or "-") .. ":" .. tostring(st.active_scheme or "-")
+	end
+	local ok_path, path_reason = trade_path.prepare_active(st.object, smart, st, nil, true)
+	if ok_path ~= true and not trade_path.acceptable_prepare_result(path_reason) then
+		return false, "trade_path_prepare_failed:" .. tostring(path_reason or "-")
+	end
+	print_trade_debug(
+		"~ ZHOPA2 trade debug | trade_job_active npc [%s] smart [%s] job [%s] detail [%s]",
+		tostring(npc_id),
+		tostring(object_id(smart) or "-"),
+		tostring(section),
+		tostring(path_reason or "vanilla")
+	)
+	return true, path_reason or "trade_job_active"
 end
 
 function M.release_online_trade_npc_to_smart(npc, smart, reason)
@@ -3131,6 +3755,35 @@ local function recover_stale_prepared_trade(squad, now)
 	local tonum = tonumber
 	local tostr = tostring
 	now = now or tg()
+	local squad_id = object_id(squad)
+	local smart_id = tonum(squad.zhopa2_trade_prepared_smart_id) or tonum(squad.zhopa2_last_trade_smart)
+	local npc_id = tonum(squad.zhopa2_trade_prepared_npc_id)
+	local smart = smart_by_id(smart_id)
+	local npc = npc_id and online_object_by_id(npc_id) or nil
+	local cancel_reason = trade_path.prepared_trade_cancel_reason(squad, smart_id, npc_id, smart)
+	if cancel_reason then
+		trade_path.restore_trade_priority_boosts(smart_id, squad_id, npc_id, cancel_reason)
+		if npc then
+			clear_npc_trade_state(npc)
+		else
+			trade_path.clear_trade_storage(npc_id and db and db.storage and db.storage[npc_id] or nil)
+		end
+		M.clear_prepared_trade_job(smart, npc_id, cancel_reason)
+		release_smart_trade_slot(smart_id, squad_id)
+		set_squad_trade_cooldown(squad, now)
+		mark_squad_trade_result(squad, cancel_reason, squad.zhopa2_trade_prepared_reason or squad.zhopa2_last_trade_reason or "trade_prepared", smart)
+		print_trade_error(
+			"~ ZHOPA2 trade error | reason [%s] squad [%s:%s] npc [%s:%s] smart [%s:%s]",
+			tostr(cancel_reason),
+			object_name(squad),
+			tostr(squad_id or "-"),
+			object_name(npc),
+			tostr(npc_id or "-"),
+			object_name(smart),
+			tostr(smart_id or "-")
+		)
+		return true, cancel_reason
+	end
 	local deadline = tonum(squad.zhopa2_trade_prepared_until)
 	if not (deadline and deadline > 0) then
 		deadline = (tonum(squad.zhopa2_last_trade_time) or now) + C.TRADE_PREPARED_TIMEOUT_MS
@@ -3140,11 +3793,7 @@ local function recover_stale_prepared_trade(squad, now)
 		return false, "trade_prepared"
 	end
 
-	local squad_id = object_id(squad)
-	local smart_id = tonum(squad.zhopa2_trade_prepared_smart_id) or tonum(squad.zhopa2_last_trade_smart)
-	local npc_id = tonum(squad.zhopa2_trade_prepared_npc_id)
-	local smart = smart_by_id(smart_id)
-	local npc = npc_id and online_object_by_id(npc_id) or nil
+	trade_path.restore_trade_priority_boosts(smart_id, squad_id, npc_id, "trade_prepared_timeout")
 	trade_path.ban_npc_for_session(npc_id, "trade_prepared_timeout")
 	if npc then
 		clear_npc_trade_state(npc)
@@ -3166,6 +3815,10 @@ local function recover_stale_prepared_trade(squad, now)
 	)
 	mark_squad_trade_result(squad, "trade_prepared_timeout", squad.zhopa2_trade_prepared_reason or squad.zhopa2_last_trade_reason or "trade_prepared", smart)
 	return true, "trade_prepared_timeout"
+end
+
+function M.recover_prepared_trade(squad, reason)
+	return recover_stale_prepared_trade(squad, tg())
 end
 
 local function squad_current_trade_smart(squad)
@@ -3493,14 +4146,75 @@ local function prepare_npc_vanilla_trade(npc, squad, smart, trader, reason, opts
 	st.zhopa2_trade_squad_id = object_id(squad)
 	st.zhopa2_trade_smart_id = object_id(smart)
 	st.zhopa2_trade_trader_id = nil
+	st.zhopa2_trade_job_section = opts.job_section
+	st.zhopa2_trade_priority_boosted = opts.priority_boosted == true
 	st.zhopa2_trade_reason = reason
 	st.zhopa2_trade_member_ids = opts.member_ids
 	return true
 end
 
+local function prepare_online_trade_job(npc, squad, members, smart, trader, reason, opts)
+	opts = opts or {}
+	local npc_id = object_id(npc)
+	local npc_info = smart and smart.npc_info and smart.npc_info[npc_id] or nil
+	if not (npc_id and npc_info) then
+		return false, "trade_no_npc_info"
+	end
+	local job, section, find_reason = find_trade_customer_job(smart, npc_id)
+	if not job then
+		return false, find_reason or "no_trade_customer_job"
+	end
+	local member_ids = opts.member_ids or squad_trade_member_ids(members)
+	if not prepare_npc_vanilla_trade(npc, squad, smart, trader, reason, { force_intent = true, member_ids = member_ids, job_section = section }) then
+		return false, "nothing_to_trade"
+	end
+	local selected, selected_section = trade_path.select_trade_customer_job(smart, npc_id, npc_info, "native")
+	if selected then
+		local path_ok, path_reason = trade_path.prepare_selected_trade_job_path(npc, smart, selected_section, "trade_native_selected")
+		if path_ok ~= true then
+			clear_npc_trade_state(npc)
+			return false, path_reason or "trade_path_prepare_failed"
+		end
+		local st = db and db.storage and db.storage[npc_id] or nil
+		if st then
+			st.zhopa2_trade_job_section = selected_section
+			st.zhopa2_trade_priority_boosted = false
+		end
+		return true, "trade_prepared", selected_section
+	end
+
+	local boosted, boost_reason = trade_path.apply_trade_priority_boost(smart, job, npc_info, squad, npc_id, reason)
+	if not boosted then
+		clear_npc_trade_state(npc)
+		return false, boost_reason or "trade_priority_not_boostable"
+	end
+
+	selected, selected_section = trade_path.select_trade_customer_job(smart, npc_id, npc_info, "priority_boost")
+	if selected then
+		if selected_section ~= section then
+			trade_path.restore_trade_priority_boosts(object_id(smart), object_id(squad), npc_id, "trade_selected_other_job")
+		end
+		local path_ok, path_reason = trade_path.prepare_selected_trade_job_path(npc, smart, selected_section or section, "trade_priority_selected")
+		if path_ok ~= true then
+			trade_path.restore_trade_priority_boosts(object_id(smart), object_id(squad), npc_id, path_reason or "trade_path_prepare_failed")
+			clear_npc_trade_state(npc)
+			return false, path_reason or "trade_path_prepare_failed"
+		end
+		local st = db and db.storage and db.storage[npc_id] or nil
+		if st then
+			st.zhopa2_trade_job_section = selected_section or section
+			st.zhopa2_trade_priority_boosted = selected_section == section
+		end
+		return true, "trade_prepared", selected_section or section
+	end
+
+	trade_path.restore_trade_priority_boosts(object_id(smart), object_id(squad), npc_id, "trade_job_not_selected")
+	clear_npc_trade_state(npc)
+	return false, "trade_job_not_selected"
+end
+
 local function prepare_squad_vanilla_trade(squad, members, trader, smart, reason, opts)
 	opts = opts or {}
-	local tostr = tostring
 	local has_work, work_reason = squad_members_have_trade_work(members, squad)
 	if not has_work then
 		mark_squad_queue_state(squad, "done", object_id(smart), reason)
@@ -3510,20 +4224,25 @@ local function prepare_squad_vanilla_trade(squad, members, trader, smart, reason
 	end
 
 	local leader = members and members[1] or nil
-	if leader and prepare_npc_vanilla_trade(leader, squad, smart, trader, reason, { force_intent = true, member_ids = squad_trade_member_ids(members) }) then
+	local prepared, prepare_result, job_section = false, "nothing_to_trade", nil
+	if leader then
+		prepared, prepare_result, job_section = prepare_online_trade_job(leader, squad, members, smart, trader, reason, opts)
+	end
+	if prepared then
 		set_smart_trade_slot_remaining(object_id(smart), object_id(squad), 1)
 		squad.zhopa2_trade_prepared_until = tg() + C.TRADE_PREPARED_TIMEOUT_MS
 		squad.zhopa2_trade_prepared_npc_id = object_id(leader)
 		squad.zhopa2_trade_prepared_smart_id = object_id(smart)
 		squad.zhopa2_trade_prepared_trader_id = nil
+		squad.zhopa2_trade_prepared_job_section = job_section
 		squad.zhopa2_trade_prepared_reason = reason
 		mark_squad_trade_result(squad, "trade_prepared", reason, smart)
 		return false, "trade_prepared"
 	end
 	mark_squad_queue_state(squad, "done", object_id(smart), reason)
-	mark_squad_trade_result(squad, "nothing_to_trade", reason, smart)
+	mark_squad_trade_result(squad, prepare_result or "nothing_to_trade", reason, smart)
 	release_smart_trade_slot(object_id(smart), object_id(squad))
-	return false, "nothing_to_trade"
+	return false, prepare_result or "nothing_to_trade"
 end
 
 local function execute_offline_auto_trade(squad, smart, reason, now)
@@ -3651,15 +4370,16 @@ function M.try_auto_trade_npc(npc, trader, reason, opts)
 	end
 	local members = online_squad_trade_members(squad, smart, true)
 	ensure_trade_source_member(members, npc)
-	local ok, prepared = pcall(prepare_npc_vanilla_trade, npc, squad, smart, trader, reason or "try_auto_trade_npc", { force_intent = true, member_ids = squad_trade_member_ids(members) })
+	local ok, prepared, prepare_result, job_section = pcall(prepare_online_trade_job, npc, squad, members, smart, trader, reason or "try_auto_trade_npc", { member_ids = squad_trade_member_ids(members) })
 	M.flush_trade_events()
 	if not (ok and prepared == true) then
-		return false, ok and "nothing_to_trade" or "prepare_error"
+		return false, ok and (prepare_result or "nothing_to_trade") or "prepare_error"
 	end
 	squad.zhopa2_trade_prepared_until = tg() + C.TRADE_PREPARED_TIMEOUT_MS
 	squad.zhopa2_trade_prepared_npc_id = object_id(npc)
 	squad.zhopa2_trade_prepared_smart_id = object_id(smart)
 	squad.zhopa2_trade_prepared_trader_id = nil
+	squad.zhopa2_trade_prepared_job_section = job_section
 	squad.zhopa2_trade_prepared_reason = reason or "try_auto_trade_npc"
 	mark_squad_trade_result(squad, "trade_prepared", reason or "try_auto_trade_npc", smart)
 	return false, "trade_prepared"
@@ -3784,6 +4504,7 @@ function M.complete_axr_online_trade(npc, smart, result, reason)
 	end
 	local result_name = result == "traded" and "traded" or tostring(result or "nothing_to_trade")
 	local finish_reason = reason or st and st.zhopa2_trade_reason or squad and squad.zhopa2_trade_prepared_reason or "axr_trade"
+	trade_path.restore_trade_priority_boosts(smart_id, squad_id, npc_id, result_name)
 	if M.is_squad_object(squad) then
 		set_squad_trade_cooldown(squad, tg())
 		mark_squad_trade_result(squad, result_name, finish_reason, smart or smart_by_id(smart_id))
@@ -3873,6 +4594,7 @@ local function on_game_load()
 	trade_path.offline_profile_cleanup_at = 0
 	trade_path.session_banned_npcs = {}
 	SMART_TRADE_QUEUE = {}
+	SMART_TRADE_PRIORITY_BOOSTS = {}
 	M.flush_trade_events()
 end
 
