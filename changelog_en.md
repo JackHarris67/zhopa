@@ -1,4 +1,4 @@
-## 2.0.0 — 2026-06-10
+## 2.0.0
 
 ### General
 - The project has been renamed and published as **Z.H.O.P.A. ALIFE 2.0**.
@@ -20,17 +20,31 @@
 - Added online NPC economy: NPCs sell real items to traders and buy basic supplies.
 - Squad leaders now trade for the whole squad, pool member money, and can buy supplies for members.
 - Online selling uses real items and changes the trader's inventory; basic supply purchases may be spawned virtually so player-facing stock is not drained.
-- Added offline trade on smarts with live traders: server-side inventory is sold and change is represented with money item sections.
-- Offline money item sections are converted into NPC balance when squads return online.
+- Added offline trade on trader smarts: virtual cargo is sold through an abstract market and money is tracked as serializable squad balance.
+- Virtual offline squad money is converted into NPC balance when squads return online.
 - Added the targeted `TRADE` task: its chance scales with sellable inventory value, while opportunistic trade may also run during rest/base camping.
 - Added config and MCM control for the NPC sell price multiplier. Default value: `0.2`.
 - Added dynamic-news / console trade messages close to vanilla NPC trade output.
+- Online trade now follows the tested vanilla/SISKI contract: `axr_trade_manager` executes the deal and the actual trader comes from the selected smart job's `npc_info.job.seller_id`.
+- The leader trades for the whole squad, sells real online items and virtual cargo, pools member money, and buys bounded supplies for squad members.
+- Added a real queue: NPCs outside the active customer slot receive no trade state and perform no repeated inventory preparation.
+- After native job selection fails, ZHOPA2 may temporarily raise the priority of a free exclusive trade-customer job; original priority is restored after success, cancel, or timeout.
+- Invalid trade-job vertices are repaired only in runtime path data by selecting the nearest accessible vertex toward the trade point; smart configs are not modified.
+- Trade smarts and trader sections have dedicated blacklists.
+- Removed the synthetic repair-item purchase after an ordinary deal: tech intent is now created only for a real `i_upgrade` item already held by the NPC.
+- The service doctor recognizes trade/tech customer jobs by section or `suitable` and returns a confirmed stuck NPC through vanilla `smart:select_npc_job` instead of resetting `state_mgr` manually.
 
 ### Loot
 - Online looting has been moved into the compatible runtime patching contour.
-- Added offline looting of real items with results written into squad inventories.
+- Added bounded virtual offline cargo without mass-creating server-side items.
 - Added guards against endless loot loops on corpses and containers that still contain non-pickable or quest items.
 - Added anti-stall handling for cases where an NPC keeps looking at an item but cannot reach it.
+- Offline loot is now bounded serializable virtual cargo and no longer mass-creates server-side items.
+- Offline money is now `zhopa2_virtual_money`; `money_*` note sections are no longer used as currency.
+- Virtual cargo is sold offline or materialized only in controlled online-death scenarios.
+- Direct use of the unsafe `commander_id()` method has been removed from ZHOPA2 code.
+- Revenge no longer reads or changes relations through transient online NPC wrappers: goodwill snapshot, hostility, and restoration use server ids, eliminating the `online_actor_goodwill` BusyHands path.
+- Destructive legacy-save cleanup and mod-removal save preparation were removed after causing BusyHands/runtime corruption.
 
 ### Tasks And ALife
 - Reworked task selection, weighted target selection, and debug reasons for stalker and mutant task contours.
@@ -51,6 +65,8 @@
 - Tested against vanilla Anomaly and the GAMMA profile.
 - Fixed GAMMA trade conflicts, wrong trader selection, post-service/trade job stalls, and smart job desynchronization.
 - Restored old ZHOPA 1.x changelog history below as the legacy section.
+- Fixed runtime buckets, module lifecycle, artifact assignment/retargeting, hunt/revenge routing, service filler behavior, and guide-arrival rest handling.
+- Core integration remains chain-friendly runtime patching; `axr_trade_manager.script` is the intentional documented override exception.
 
 ## 1.0.1
 

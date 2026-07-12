@@ -1672,19 +1672,7 @@ local function member_server_object(member)
 	if not member then
 		return nil
 	end
-	return member.object or (member.id and alife_object(member.id)) or nil
-end
-
-local function member_online_object(member)
-	local id = member and member.id or nil
-	if not id then
-		return nil
-	end
-	local storage = db and db.storage and db.storage[id] or nil
-	if storage and storage.object then
-		return storage.object
-	end
-	return level and type(level.object_by_id) == "function" and level.object_by_id(id) or nil
+	return member.object or (member.id and safe_alife_object(member.id)) or nil
 end
 
 local function is_inventory_owner_object(obj)
@@ -1707,93 +1695,32 @@ local function member_inventory_owner_server_object(member)
 	return is_inventory_owner_object(obj) and obj or nil
 end
 
-local function inventory_owner_target(target)
-	if target == nil then
+local function force_server_goodwill(source, goodwill, target_id)
+	target_id = tonumber(target_id)
+	if not (source and target_id and type(source.force_set_goodwill) == "function") then
 		return false
 	end
-	if type(target) == "number" then
-		return is_inventory_owner_object(alife_object(target))
-	end
-	return is_inventory_owner_object(target)
-end
-
-local function force_goodwill(source, goodwill, target)
-	if not (source and target ~= nil) then
+	if not (is_inventory_owner_object(source) and is_inventory_owner_object(safe_alife_object(target_id))) then
 		return false
 	end
-	if not (is_inventory_owner_object(source) and inventory_owner_target(target)) then
-		return false
-	end
-	local ok = pcall(function()
-		source:force_set_goodwill(goodwill, target)
-	end)
+	local ok = pcall(source.force_set_goodwill, source, goodwill, target_id)
 	return ok == true
 end
 
-local function is_online_relation_stalker(obj)
-	if not (obj and IsStalker) then
-		return false
-	end
-	local ok, is_stalker = pcall(IsStalker, obj)
-	if ok and is_stalker == true then
-		return true
-	end
-	return false
-end
-
-local function online_relation_matches(source, target, relation)
-	local ok_relation, current = pcall(function()
-		return source:relation(target)
-	end)
-	return ok_relation and current == relation
-end
-
-local function set_online_relation(source, target, relation, goodwill)
-	if not (relation and is_online_relation_stalker(source) and is_online_relation_stalker(target)) then
-		return false
-	end
-	local ok = pcall(function()
-		source:set_relation(relation, target)
-	end)
-	if ok == true and online_relation_matches(source, target, relation) then
-		return true
-	end
-	if goodwill ~= nil then
-		force_goodwill(source, goodwill, target)
-		return online_relation_matches(source, target, relation)
-	end
-	return false
-end
-
 local function force_member_to_actor(member)
-	local applied = false
-	local obj = member_online_object(member)
-	if obj and db and db.actor and game_object then
-		force_goodwill(obj, REVENGE_GOODWILL, db.actor)
-		applied = online_relation_matches(obj, db.actor, game_object.enemy) or applied
-	end
-	return applied
+	local se_obj = member_inventory_owner_server_object(member)
+	return se_obj and force_server_goodwill(se_obj, REVENGE_GOODWILL, ACTOR_TARGET_ID) or false
 end
 
 local function force_member_to_member(member_1, member_2, goodwill)
 	local applied = false
-	local obj_1 = member_online_object(member_1)
-	local obj_2 = member_online_object(member_2)
-	if obj_1 and obj_2 and game_object then
-		applied = set_online_relation(obj_1, obj_2, game_object.enemy, goodwill) or applied
-		applied = set_online_relation(obj_2, obj_1, game_object.enemy, goodwill) or applied
-	end
-	if applied then
-		return true
-	end
-
 	local se_1 = member_inventory_owner_server_object(member_1)
 	local se_2 = member_inventory_owner_server_object(member_2)
 	if se_1 and se_2 and se_2.id then
-		applied = force_goodwill(se_1, goodwill, se_2.id) or applied
+		applied = force_server_goodwill(se_1, goodwill, se_2.id) or applied
 	end
 	if se_2 and se_1 and se_1.id then
-		applied = force_goodwill(se_2, goodwill, se_1.id) or applied
+		applied = force_server_goodwill(se_2, goodwill, se_1.id) or applied
 	end
 	return applied
 end
@@ -1806,17 +1733,6 @@ local function actor_on_squad_level(squad)
 		return simulation_objects.is_on_the_actor_level(squad) == true
 	end
 	return squad and squad.online == true
-end
-
-local function current_actor_id()
-	local actor = db and db.actor or nil
-	if actor and type(actor.id) == "function" then
-		local ok, id = pcall(actor.id, actor)
-		if ok and id ~= nil then
-			return tonumber(id) or id
-		end
-	end
-	return ACTOR_TARGET_ID
 end
 
 local function current_actor_level_name()
@@ -1840,7 +1756,7 @@ local function actor_community_goodwill(community)
 	if not (community and relation_registry and type(relation_registry.community_goodwill) == "function") then
 		return nil
 	end
-	local ok, goodwill = pcall(relation_registry.community_goodwill, community, current_actor_id())
+	local ok, goodwill = pcall(relation_registry.community_goodwill, community, ACTOR_TARGET_ID)
 	return ok and tonumber(goodwill) or nil
 end
 
@@ -1848,23 +1764,18 @@ local function set_actor_community_goodwill(community, goodwill)
 	if not (community and goodwill ~= nil and relation_registry and type(relation_registry.set_community_goodwill) == "function") then
 		return false
 	end
-	local ok = pcall(relation_registry.set_community_goodwill, community, current_actor_id(), goodwill)
+	local ok = pcall(relation_registry.set_community_goodwill, community, ACTOR_TARGET_ID, goodwill)
 	return ok == true
 end
 
-local function online_actor_goodwill(obj)
-	local actor = db and db.actor or nil
-	if not (obj and actor) then
+local function member_actor_goodwill(member)
+	local member_id = member and tonumber(member.id) or nil
+	local actor_id = ACTOR_TARGET_ID
+	if not (member_id and actor_id and member_inventory_owner_server_object(member)) then
 		return nil
 	end
-	if type(obj.general_goodwill) == "function" then
-		local ok, goodwill = pcall(obj.general_goodwill, obj, actor)
-		if ok and goodwill ~= nil then
-			return tonumber(goodwill) or nil
-		end
-	end
-	if type(obj.goodwill) == "function" then
-		local ok, goodwill = pcall(obj.goodwill, obj, actor)
+	if relation_registry and type(relation_registry.get_general_goodwill_between) == "function" then
+		local ok, goodwill = pcall(relation_registry.get_general_goodwill_between, member_id, actor_id)
 		return ok and tonumber(goodwill) or nil
 	end
 	return nil
@@ -1874,12 +1785,8 @@ local function restore_member_actor_goodwill(member_id, goodwill)
 	if not (member_id and goodwill ~= nil) then
 		return false
 	end
-	local obj = member_online_object({ id = member_id })
-	if obj and db and db.actor then
-		return force_goodwill(obj, goodwill, db.actor)
-	end
 	local se_obj = member_inventory_owner_server_object({ id = member_id })
-	return se_obj and force_goodwill(se_obj, goodwill, current_actor_id()) or false
+	return se_obj and force_server_goodwill(se_obj, goodwill, ACTOR_TARGET_ID) or false
 end
 
 local function squad_member_id_set(squad)
@@ -1983,8 +1890,7 @@ local function snapshot_member_actor_goodwill(member, bucket)
 	if not (member and member.id and bucket and bucket[member.id] == nil) then
 		return false
 	end
-	local obj = member_online_object(member)
-	local goodwill = online_actor_goodwill(obj)
+	local goodwill = member_actor_goodwill(member)
 	if goodwill == nil then
 		return false
 	end

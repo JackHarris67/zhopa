@@ -1,120 +1,118 @@
 # Z.H.O.P.A. ALIFE 2.0
 
-[Russian](README.md)
-[Changelog](changelog_en.md)
+[Русский](README.md) | [Changelog](changelog_en.md) | [Architecture](docs/zhopa_alife_2_design_document_en.md) | [Function reference](docs/zhopa_alife_2_function_reference_en.md)
 
-**Zone Hostile Operations & Population AI (Z.H.O.P.A.) ALIFE 2.0** is a modular ALife layer for S.T.A.L.K.E.R. Anomaly 1.5.3 + Modded Exes.
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/qkff99/zhopa)
 
-The addon works on top of SIMBOARD, smart terrain, and squad update: it chooses squad tasks, keeps memory, adds economy, looting, hunting, artefacts, dynamic base ownership, and some story reactions. Vanilla still owns movement, smart jobs, online/offline transitions, and core combat behavior.
+> **Zone Hostile Operations & Population AI** - a modular ALife extension for S.T.A.L.K.E.R. Anomaly 1.5.3 + Modded Exes.
 
-## What It Does
+Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful tasks, pursue moving targets, collect loot and artefacts, trade, occupy bases, and react to story events. Movement, smart jobs, online/offline transitions, pathfinding, and core combat behavior remain under game control.
 
-- Assigns stalker squads exploration, smart population, patrol, rest, hunt, revenge, trade, and artefact tasks.
-- Gives mutants a separate task pool: roaming, patrol, hunt, and rest.
-- Updates hunt targets by their real online/offline position, so the target can be pursued across the whole Zone with level transitions during the chase.
-- Extends online looting and adds offline looting of real items.
-- Adds NPC economy: real item sales, supply purchases, trade routes, and offline trade.
-- Adds artefact logic: real artefacts, virtual offline artefacts, online pickup with a selected NPC and detector animation.
-- Tracks dynamic base ownership and service NPCs for suitable bases. Killed traders can be replaced after an emission by new ones from the faction that currently owns the smart.
-- Adds story systems: psi-level squad zombification and northern migration after the Brain Scorcher is disabled. This works only if story mode was enabled when the new game was created.
-- Provides a debug HUD and diagnostic scripts for tasks, indexes, trade, looting, and artefacts. Diagnostic scripts are kept in the repository and will not be included in release builds; they are mainly for bug hunting and development.
+## Features
 
-## Main Systems
-
-### Squad Tasks
+| Subsystem | Behavior |
+| --- | --- |
+| Squad tasks | Stalkers explore the Zone, populate smart terrains, patrol, rest, hunt, take revenge, collect artefacts, and travel to trade. Mutants use a separate task pool. |
+| Hunt and revenge | Targets are tracked by their actual squad position, including level transitions. Actor revenge makes only the assigned squad hostile, not its entire faction. |
+| Loot | Online logic extends vanilla pickup and prevents loops on rejected items. Offline loot is bounded virtual cargo and consumes no engine object IDs. |
+| Economy | The leader trades for the whole squad, sells real and virtual goods, pools member money, and buys basic supplies. |
+| Artefacts | Real and virtual offline artefacts are supported, including smart assignment and online pickup by a selected NPC with detector animation. |
+| Bases and services | The addon tracks base ownership and can refill suitable service roles after an emission. |
+| Story events | Story mode enables psi zombification and northern migration after the Brain Scorcher shutdown. These systems do not run in freeplay. |
 
 Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
 
-Some tasks are selected by weight, while others are assigned as direct reactions. For example, `REVENGE` comes from a revenge event, `NIGHT_REST` interrupts stalkers at night, `BASE_CAMPING` binds a squad to a base, and `STORY_NORTH_MIGRATION` is owned by the story module.
+## Trade and Economy
 
-### Economy and Trade
+- Online deals run through a vanilla trade customer job and the SISKI-derived `axr_trade_manager.script`.
+- The smart job selects the actual seller through `npc_info.job.seller_id`; ZHOPA does not replace it with a preselected NPC.
+- Only traders and barmen are regular trade providers. Medics, mechanics, and faction leaders are not treated as ordinary sellers.
+- A mechanic visit can be triggered only by a real `i_upgrade` item held by the NPC. Ordinary supply purchases do not create synthetic tech intent.
+- Offline deals sell serializable virtual cargo and use virtual squad money.
+- `npc_sell_price_multiplier` controls NPC sale income; the default value is `0.2`.
 
-Squads can sell excess artefacts, weapons, outfits, ammo, medicine, food, and other loot. The squad leader can trade for the whole squad. Offline trade sells serializable virtual loot cargo and uses virtual squad money so long saves do not inflate the engine object id pool.
+## Looting
 
-NPC sale income is controlled by `npc_sell_price_multiplier`; the default value is `0.2`.
+Online looting uses vanilla pickup schemes whenever they can complete normally. ZHOPA adds targeted pickup, anti-stall handling, and memory cleanup after rejected or completed loot so an NPC cannot retry the same corpse or item forever.
 
-### Looting
+After offline combat, loot is recorded in a bounded virtual ledger. It is sold through the economy or materialized only in a controlled scenario, such as an online NPC death. This prevents long playthroughs from exhausting the engine object-ID pool.
 
-Online looting works on top of vanilla pickup behavior and tries to preserve normal NPC logic. Offline looting records bounded virtual cargo after offline combat; that cargo is sold by trade or materialized only when an online NPC death needs real items. The system also clears rejected loot targets so NPCs do not loop forever on one corpse or item.
+## Artefacts
 
-### Artefacts
+Real artefacts are registered in runtime indexes and belong to exactly one suitable smart bucket. A real artefact is preferred whenever one is available. Virtual artefacts are generated from anomaly-zone settings for the offline economy only and do not reduce real artefact spawn.
 
-Real artefacts are registered in indexes and assigned to a suitable smart terrain. The offline economy can use virtual artefacts generated from anomaly settings. If a real artefact is available, it is preferred over a virtual one.
+## Requirements
 
-### Story Events
+- S.T.A.L.K.E.R. Anomaly 1.5.3.
+- Current Modded Exes for Anomaly 1.5.3.
+- MCM is optional; without it, defaults come from `gamedata/configs/zhopa2_settings.ltx`.
 
-The psi watchdog can convert unprotected stalker squads on psi levels into zombified squads. Northern migration after the Brain Scorcher sends a selected percentage of eligible squads toward northern levels.
+## Installation
 
-Both systems should run only in story mode and must not fire in freeplay.
+### Mod Organizer 2
+
+1. Disable or remove old REZNYA, SISKI, and ZHOPA versions.
+2. In MO2, select `File` -> `Install Mod...`.
+3. Select the Z.H.O.P.A. ALIFE 2.0 archive and confirm installation.
+4. Place the addon below conflicting mods when its bundled `axr_trade_manager.script` must win the conflict.
+
+### Manual
+
+Copy the `gamedata` directory into the Anomaly root. Verify the resulting files under `gamedata/scripts`, `gamedata/configs`, `gamedata/configs/text`, and `gamedata/textures`.
 
 ## Settings
 
-Settings are available through:
+Settings are available in MCM -> `ZHOPA ALIFE 2` and mirrored in `gamedata/configs/zhopa2_settings.ltx`.
 
-- `gamedata/configs/zhopa2_settings.ltx`
-- MCM -> `ZHOPA ALIFE 2`
-
-Main MCM groups:
+Main MCM sections:
 
 - core systems;
 - economy and helper systems;
 - story events;
-- stalker simulation;
-- task weights;
-- task timing;
-- combat and target following;
-- mutant simulation.
-
-## Installation
-
-With Mod Organizer 2:
-
-1. Make sure old ZHOPA/SISKI/REZNYA versions are disabled or removed, and disable incompatible mods listed below.
-2. `MO2` -> `File` -> `Install Mod...` -> select the downloaded archive -> press `OK`.
-
-Manual install:
-
-1. Copy `gamedata` into the Anomaly root.
-2. Verify that files landed under `gamedata/scripts`, `gamedata/configs`, and `gamedata/configs/text`.
-
-What is better to disable in your build:
-
-- `Alife Plus` must be disabled. It is not compatible with `ZHOPA`.
-- Mods such as `NPC Loot claim` and `NPC stop looting dead bodies`. In `Useful Idiots` settings, disable the option that allows only companions to search bodies. A large part of NPC economic interaction depends on NPC inventory contents, so loot restrictions will interfere. This is not mandatory; if you do not like ZHOPA's looting or economy, you can disable those systems in MCM.
-- `xcvb's Guards Spawner` does not block ZHOPA, but it will constantly spam the log because ZHOPA takes over its squads.
-
-How to check that the addon is working:
-
-- Enable the debug HUD in the addon MCM. Squad markers should appear on the PDA map. Hovering over a squad should show a tooltip with the squad's current target. The debug HUD is mainly for debugging and is not recommended for normal play, because it can spoil the natural feel of the simulation. Use it if you want to see how the system is working.
+- stalker and mutant simulation;
+- task weights and durations;
+- combat, routing, and target following;
+- debugging.
 
 ## Compatibility
 
-- Target version: Anomaly 1.5.3 + Modded Exes.
-- Tested on `G.A.M.M.A 0.9.5/0.9.4` and `Anthology 2.1`.
-- Compatible with `ZCP`, all `REDONE` mods, and `New Levels`.
-- Not compatible with `Alife Plus`, and it never will be.
-- Mods that fully replace `sim_squad_scripted`, `smart_terrain`, `sim_board`, `xr_gather_items`, `xr_corpse_detection`, or related callbacks may conflict.
-- Combat AI mods are usually less risky if they do not break SIMBOARD, smart terrain, or core callbacks.
+| Status | Mods and builds |
+| --- | --- |
+| Tested | Vanilla Anomaly 1.5.3, G.A.M.M.A. 0.9.4/0.9.5, Anthology 2.1 |
+| Compatible | ZCP, the REDONE family, New Levels |
+| Incompatible | Alife Plus |
+| Requires testing | Mods that fully replace `sim_squad_scripted`, `smart_terrain`, `sim_board`, `xr_gather_items`, `xr_corpse_detection`, `axr_trade_manager`, or related callbacks |
 
-## Debugging
+Additional notes:
 
-Enable `debug_hud_enabled` to inspect runtime behavior. It displays squad state on map markers and enables additional diagnostic console output.
+- NPC loot restrictions, including `NPC Loot Claim`, `NPC Stop Looting Dead Bodies`, and the Useful Idiots option that allows only companions to search bodies, reduce the amount of functioning economy. ZHOPA looting or economy can be disabled separately in MCM.
+- `xcvb's Guards Spawner` does not block the addon, but it may write log messages about squads after ZHOPA begins managing them.
+- Combat AI addons are usually safer as long as they do not replace SIMBOARD, smart terrain, or core lifecycle callbacks.
 
-Additional diagnostic scripts live in `debugscripts`. They are not meant to be part of a normal user install and are intended for testing specific subsystems.
+## Saves and Uninstallation
+
+> There is no automatic SISKI/ZHOPA1 save cleaner or ZHOPA2 uninstall preparation. That mechanism proved unsafe and was removed after BusyHands/runtime corruption cases.
+
+To uninstall the addon, return to a save created before installation. After a BusyHands warning, do not continue the current session; reload a save or return to the main menu.
+
+## Verification and Debugging
+
+Enable `debug_hud_enabled` in MCM. Managed squad markers will appear on the PDA map; their tooltips show task, target, smart, reason, and last result. This mode is intended for diagnostics and can reveal otherwise hidden simulation behavior.
+
+Additional diagnostic scripts live in `debugscripts`. They are not part of a normal user installation and are enabled only for focused subsystem testing.
 
 ## Documentation
 
 - [Architecture document](docs/zhopa_alife_2_design_document_en.md)
-- [Russian architecture document](docs/zhopa_alife_2_design_document.md)
+- [Архитектурный документ](docs/zhopa_alife_2_design_document.md)
 - [Function reference](docs/zhopa_alife_2_function_reference_en.md)
+- [Changelog](changelog_en.md)
+- [Список изменений](changelog_ru.md)
 
-## Development Notes
+## Development
 
-Before changing behavior, check whether there is a vanilla extension point or an existing runtime patch. New systems should:
+Before changing behavior, look for a vanilla extension point first. New subsystems must respect the shared readiness barrier, register their own callbacks, avoid broad scans in hot paths, and persist only serializable values. A full override requires a documented reason; `axr_trade_manager.script` is the current intentional exception.
 
-- respect the shared runtime readiness barrier;
-- register their own callbacks;
-- avoid global scans in hot paths;
-- store only serializable values in saves;
-- update MCM, localization, and documentation when adding user-facing settings.
+## License
 
+[MIT](LICENSE), Copyright (c) 2026 qkff99.

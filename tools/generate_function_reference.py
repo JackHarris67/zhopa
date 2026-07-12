@@ -26,23 +26,25 @@ SCRIPT_HOOKS = {
 }
 
 SCRIPT_ROLES = {
+    "axr_trade_manager.script": "SISKI-derived vanilla trade-manager override that executes online squad trade and technician service through real smart customer jobs",
     "zhopa2_artifacts.script": "artifact target selection, real/virtual artifact handling, and online/offline pickup flow",
     "zhopa2_bootstrap.script": "minimal startup bridge into the runtime patch orchestrator",
     "zhopa2_cfg.script": "configuration, MCM defaults, faction aliases, and blacklist access",
     "zhopa2_debug_hud.script": "debug PDA map markers and squad status hints",
-    "zhopa2_economy.script": "online/offline trade policy, sellable inventory scanning, virtual cargo, and trade routing",
-    "zhopa2_index.script": "event-driven SIMBOARD buckets for squads, smarts, artifacts, ownership, and trade smart flags",
+    "zhopa2_economy.script": "online customer-job preparation, offline trade execution, pricing, virtual cargo/money, queues, routing, and trade-job path recovery",
+    "zhopa2_index.script": "thin access layer over SIMBOARD-owned squad/smart buckets plus artifact, ownership, and trade-smart state",
     "zhopa2_loot.script": "online loot integration, offline virtual loot accounting, artifact cargo, and loot-loop protection",
     "zhopa2_mcm.script": "MCM menu registration and settings bridge",
     "zhopa2_mcm_schema.script": "MCM option schema and defaults",
     "zhopa2_memory.script": "serializable squad state, cargo, virtual loot, virtual money, and save/load helpers",
     "zhopa2_perception.script": "target discovery, weighted candidate selection, path levels, and faction/blacklist checks",
-    "zhopa2_revenge.script": "revenge event detection, responder selection, and actor hostility scope",
+    "zhopa2_revenge.script": "revenge event detection, responder selection, and actor hostility scope coordinated through server ids",
     "zhopa2_runtime_patches.script": "chain-friendly runtime patching of vanilla/pack scripts",
     "zhopa2_service_fillers.script": "base service NPC detection, adoption, and filler spawning",
+    "zhopa2_smart_service_slot_doctor.script": "bounded observation and vanilla smart-job reselection for stalled trade/technician customer jobs",
     "zhopa2_story_north_migration.script": "story-gated northern migration task selection and recovery",
     "zhopa2_story_psy_watchdog.script": "story-gated psi-level squad conversion into zombied squads",
-    "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, and fallback rules",
+    "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, fallback rules, and server-side revenge relations",
     "zhopa2_topology.script": "level topology, neighbor levels, and route helpers",
 }
 
@@ -95,6 +97,8 @@ def describe(name: str, path: Path) -> str:
         return f"Reads or normalizes configuration data for the {topic} subsystem."
     if "debug" in lower or "diag" in lower or "printf" in lower or "log" in lower:
         return "Formats or emits debug/diagnostic output, normally gated by debug settings."
+    if "goodwill" in lower or "relation" in lower:
+        return "Reads, applies, snapshots, or restores faction/personal relations through safe ids or validated objects."
     if "object_id" in lower:
         return "Extracts a stable numeric id from supported object/id values."
     if "object_section" in lower or "section_name" in lower or lower.endswith("section"):
@@ -113,6 +117,10 @@ def describe(name: str, path: Path) -> str:
         return "Handles loot target selection, pickup integration, accounting, or anti-loop cleanup."
     if "trade" in lower or "sell" in lower or "buy" in lower or "money" in lower:
         return "Handles NPC trade policy, pricing, route selection, or payment accounting."
+    if "service" in lower or "tech" in lower or "mechanic" in lower:
+        return "Handles service-provider classification, customer intent, completion, or smart-job recovery."
+    if "intent" in lower:
+        return "Creates, validates, or clears a bounded runtime intent used by a vanilla scheme or smart job."
     if "squad" in lower or "member" in lower:
         return "Handles squad lookup, membership, task state, or squad-level accounting."
     if "smart" in lower or "job" in lower or "base" in lower:
@@ -226,6 +234,24 @@ def write_section(lines: list[str], root: Path, title: str, files: list[Path]) -
     return total
 
 
+def write_script_index(lines: list[str], root: Path, runtime_files: list[Path], debug_files: list[Path]) -> None:
+    lines.extend(
+        [
+            "## Script Index",
+            "",
+            "| Scope | Script | Named functions | Role |",
+            "| --- | --- | ---: | --- |",
+        ]
+    )
+    for scope, files in (("Runtime", runtime_files), ("Diagnostic", debug_files)):
+        for path in files:
+            role = SCRIPT_ROLES.get(path.name, topic_from_filename(path) + " diagnostics or helpers")
+            lines.append(
+                f"| {scope} | `{rel_display(path, root)}` | {len(parse_functions(path))} | {role}. |"
+            )
+    lines.append("")
+
+
 def generate(project_root: Path) -> str:
     runtime_files = sorted((project_root / "gamedata" / "scripts").glob("*.script"))
     debug_files = sorted((project_root / "debugscripts").glob("*.script"))
@@ -235,7 +261,7 @@ def generate(project_root: Path) -> str:
     lines: list[str] = [
         "# Z.H.O.P.A. ALIFE 2.0 Function Reference",
         "",
-        "[Architecture document](zhopa_alife_2_design_document_en.md)",
+        "[README](../README_EN.md) | [Architecture document](zhopa_alife_2_design_document_en.md) | [Русский README](../README.md)",
         "",
         "This document is generated from the current ZHOPA ALIFE 2.0 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
         "",
@@ -257,6 +283,7 @@ def generate(project_root: Path) -> str:
         "",
     ]
 
+    write_script_index(lines, project_root, runtime_files, debug_files)
     write_section(lines, project_root, "Runtime Scripts", runtime_files)
     write_section(lines, project_root, "Diagnostic Scripts", debug_files)
     return "\n".join(lines).rstrip() + "\n"

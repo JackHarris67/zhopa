@@ -16,7 +16,7 @@ local enable_npc_trade = true
 local enable_npc_upgrade = true
 local max_upgrades_per_visit = 5
 local DEBUG_PREFIX = "[Z.H.O.P.A.][AXR_TRADE] "
-local ZHOPA_AXR_PATCH_REV = "2026-06-20-r10-trade-intent-suppress"
+local ZHOPA_AXR_PATCH_REV = "2026-07-12-r11-tech-exit"
 local ITEM_TAKE_SUPPRESS_GRACE_MS = 10000
 local ZHOPA_AXR_BIND_DIAG = {
 	next_tg = 0,
@@ -24,16 +24,6 @@ local ZHOPA_AXR_BIND_DIAG = {
 local ZHOPA_AXR_RUNTIME = {
 	started = false,
 }
-local ZHOPA_MECHANIC_BONUS_ALLOWLIST = {
-	gun_oil = true,
-	gun_oil_ru_d = true,
-	gun_oil_ru = true,
-	solvent = true,
-	glue_b = true,
-	glue_a = true,
-	glue_e = true,
-}
-
 local zhopa_npc_has_items_to_sell
 local zhopa_axr_trade_job_sell_items
 local zhopa_axr_trade_job_give_id
@@ -380,39 +370,6 @@ local function pick_random_buy_candidate(valid_items, item_list, money, bw_ammos
 	return pool[math.random(#pool)], phase, diag
 end
 
-local function pick_random_mechanic_bonus_candidate()
-	local valid_items = utils_data.collect_section(ini, "buy_sell_mechanic", true)
-	if not valid_items then
-		return nil, "no_section", { pool_count = 0 }
-	end
-
-	local pool = {}
-	for sec in pairs(valid_items) do
-		if ZHOPA_MECHANIC_BONUS_ALLOWLIST[sec] then
-			local buy_sell = ini:r_string_ex("buy_sell_mechanic", sec)
-			if buy_sell and buy_sell ~= "" then
-				buy_sell = str_explode(buy_sell, ",")
-
-				local itm_base_cost = ini_sys:r_float_ex(sec, "cost") or 30
-				local total_cost = math.floor(itm_base_cost * (tonumber(buy_sell[5]) or 1))
-				pool[#pool + 1] = {
-					sec = sec,
-					cost = total_cost,
-				}
-			end
-		end
-	end
-
-	if #pool == 0 then
-		return nil, "empty_pool", { pool_count = 0 }
-	end
-
-	return pool[math.random(#pool)], "ok", {
-		pool_count = #pool,
-		example = pool[1] and pool[1].sec or nil,
-	}
-end
-
 local function get_smart_name_safe(smart)
 	if not smart then
 		return nil
@@ -494,87 +451,6 @@ local function notify_zhopa_fast_trade_candidate(npc, smart, item_section, sourc
 		reason = "npc_item_take",
 	})
 	return ok_notify and res == true
-end
-
-local function smart_has_tech_job_slot(smart)
-	local jobs = smart and smart.stalker_jobs or nil
-	if type(jobs) ~= "table" then
-		return false
-	end
-	for i = 1, #jobs do
-		local sec = jobs[i] and jobs[i].section or nil
-		if type(sec) == "string" and string.find(sec, "_beh_tech_job_", 1, true) ~= nil then
-			return true
-		end
-	end
-	return false
-end
-
-local function smart_has_live_mechanic(smart)
-	if not (smart and type(smart.npc_info) == "table") then
-		return false
-	end
-
-	for _, info in pairs(smart.npc_info) do
-		local se = info and info.se_obj or nil
-		local lower_name = nil
-		local lower_sec = nil
-		if se then
-			local ok_name, npc_name = pcall(function() return se:name() end)
-			if ok_name and type(npc_name) == "string" then
-				lower_name = string.lower(npc_name)
-			end
-		end
-		local sec = info and info.job and info.job.section or nil
-		if type(sec) == "string" then
-			lower_sec = string.lower(sec)
-		end
-		if (lower_name and (string.find(lower_name, "mechanic", 1, true) ~= nil or string.find(lower_name, "_tech", 1, true) ~= nil))
-			or (lower_sec and (string.find(lower_sec, "mechanic", 1, true) ~= nil or string.find(lower_sec, "_tech", 1, true) ~= nil))
-		then
-			return true
-		end
-	end
-
-	local by_job = smart.npc_by_job_section
-	if type(by_job) == "table" then
-		for job_sec, _ in pairs(by_job) do
-			if type(job_sec) == "string" then
-				local lower_job = string.lower(job_sec)
-				if string.find(lower_job, "mechanic", 1, true) ~= nil or string.find(lower_job, "_tech", 1, true) ~= nil then
-					return true
-				end
-			end
-		end
-	end
-
-	return false
-end
-
-local function smart_can_service_tech(smart)
-	return smart_has_tech_job_slot(smart) and smart_has_live_mechanic(smart)
-end
-
-local function smart_has_free_tech_job_slot(smart, npc_id)
-	local jobs = smart and smart.stalker_jobs or nil
-	if type(jobs) ~= "table" then
-		return false
-	end
-
-	local by_job = type(smart.npc_by_job_section) == "table" and smart.npc_by_job_section or nil
-	npc_id = tonumber(npc_id) or 0
-	for i = 1, #jobs do
-		local sec = jobs[i] and jobs[i].section or nil
-		if type(sec) == "string" and string.find(sec, "_beh_tech_job_", 1, true) ~= nil then
-			local owner = by_job and by_job[sec] or nil
-			owner = tonumber(owner) or 0
-			if owner == 0 or owner == npc_id then
-				return true
-			end
-		end
-	end
-
-	return false
 end
 
 local AXR_JOB_ROLE_NONE = {}
@@ -1537,8 +1413,6 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 	local item_list = {}
 	local buy_all_enabled = get_zhopa_buy_all_enabled()
 	local buy_success = 0
-	local defer_trade_completion_to_tech = false
-	local trade_completion_reason = "trade_done"
 	local buy_blocked_policy = 0
 	local buy_blocked_money = 0
 	local buy_blocked_stock = 0
@@ -1633,67 +1507,6 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 		last_buy_sec = pick.sec
 	end
 
-	if buy_success > 0 then
-		local bonus_pick, bonus_reason, bonus_diag = pick_random_mechanic_bonus_candidate()
-		if bonus_pick then
-			local bonus_charge = math.min(math.max(tonumber(money) or 0, 0), tonumber(bonus_pick.cost) or 0)
-			size_t = size_t + 1
-			buy_sell_items[size_t] = bonus_pick.sec
-			create_item_self_suppressed(bonus_pick.sec, npc, "npc_trade_bonus_mechanic")
-			if smart_can_service_tech(smart) then
-				local tech_intent = mark_tech_item_intent(st, bonus_pick.sec)
-				local tech_slot_free = smart_has_free_tech_job_slot(smart, id)
-				if tech_intent and tech_slot_free then
-					defer_trade_completion_to_tech = true
-					trade_completion_reason = "defer_to_tech"
-				elseif not tech_intent then
-					trade_completion_reason = "trade_done_no_tech_intent"
-				else
-					trade_completion_reason = "trade_done_no_tech_slot"
-					log_trade_warn(
-						"trade_done_no_tech_slot npc=%s id=%s sid=%s smart=%s sec=%s seller=%s money_left=%s pool=%s",
-						npc and npc:name() or "nil",
-						tostring(id),
-						tostring(resolve_squad_id_from_npc(npc) or "-"),
-						tostring(get_smart_name_safe(smart) or "-"),
-						tostring(bonus_pick.sec),
-						tostring(seller and seller:name() or seller and type(seller.id) == "function" and seller:id() or "nil"),
-						tostring(money),
-						tostring(bonus_diag and bonus_diag.pool_count or "-")
-					)
-				end
-			else
-				trade_completion_reason = "trade_done_no_tech_service"
-				log_always("buy_bonus_mechanic_skip_intent npc=%s id=%s sec=%s reason=no_tech_service",
-					npc and npc:name() or "nil",
-					tostring(id),
-					tostring(bonus_pick.sec))
-			end
-			if bonus_charge > 0 then
-				npc:transfer_money(bonus_charge, seller)
-				money = money - bonus_charge
-			end
-			buy_success = buy_success + 1
-			log_always("buy_bonus_mechanic npc=%s id=%s sec=%s full_cost=%s charged=%s money_left=%s pool=%s example=%s",
-				npc and npc:name() or "nil",
-				tostring(id),
-				tostring(bonus_pick.sec),
-				tostring(bonus_pick.cost),
-				tostring(bonus_charge),
-				tostring(money),
-				tostring(bonus_diag and bonus_diag.pool_count or 0),
-				tostring(bonus_diag and bonus_diag.example or "nil"))
-			print_trade_event("- NPC Trade | %s bonus-bought [%s] for %s RU", npc:name(), bonus_pick.sec, bonus_charge)
-		else
-			trade_completion_reason = "trade_done_no_bonus"
-			log_always("buy_bonus_mechanic_skip npc=%s id=%s reason=%s pool=%s",
-				npc and npc:name() or "nil",
-				tostring(id),
-				tostring(bonus_reason),
-				tostring(bonus_diag and bonus_diag.pool_count or 0))
-		end
-	end
-	
 	if (#buy_sell_items > 0) then 
 		if (dynamic_news_manager and ui_options.get("alife/dynamic_news/nearby_activity_news")) then 
 			dynamic_news_manager.get_dynamic_news():BoughtItems(npc,seller,buy_sell_items)
@@ -1716,8 +1529,8 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 		tostring(buy_blocked_money),
 		tostring(money))
 
-	if (not defer_trade_completion_to_tech) and smart and npc_info and npc_info.job then
-		notify_zhopa_facade_trade_started(npc, smart, trade_completion_reason)
+	if smart and npc_info and npc_info.job then
+		notify_zhopa_facade_trade_started(npc, smart, "trade_done")
 	end
 
 	finalize_service_session(npc, "trade", buy_success > 0 and "done" or "done_empty")
@@ -1760,6 +1573,9 @@ function check_tech_item(npc,item)
 	end
 
 	local sec = item:section()
+	if not (type(IsItem) == "function" and IsItem("upgrade", sec)) then
+		return
+	end
 
 	local bw = npc:best_weapon() or npc:active_item()
 	if (bw and bw:id() == item:id()) then
