@@ -1,3 +1,6 @@
+## 2.0.1
+- Fixed npc cant reach hideout when emission started
+
 ## 2.0.0
 
 ### General
