@@ -9,7 +9,120 @@ local function runtime_patches()
 	return rawget(_G, "zhopa2_runtime_patches")
 end
 
+local master_purge_fired = false
+
+local function execute_absolute_global_purge()
+	printf("====================================================")
+	printf("--- [ZHOPA IS CRACKING] Initializing data deletion  ---")
+	printf("====================================================")
+
+	local sim = alife()
+	if not sim then
+		printf("ERROR: A-Life simulation engine completely missing")
+		return
+	end
+
+	local squad_count = 0
+	local zhopa_mem = rawget(_G, "zhopa2_memory")
+	for id = 1, 65534 do
+		local se_obj = sim:object(id)
+		if se_obj and type(se_obj.clsid) == "function" and se_obj:clsid() == clsid.online_offline_group_s then
+			if zhopa_mem and type(zhopa_mem.reset_squad) == "function" then
+				zhopa_mem.reset_squad(se_obj)
+			end
+			se_obj.zhopa2_inside_squad_update = nil
+			se_obj.zhopa2_get_target_task_updated = nil
+			se_obj.scripted_target = nil
+			squad_count = squad_count + 1
+		end
+	end
+	printf("Neutralized variables across %s live squads.", tostring(squad_count))
+
+	for global_key, global_val in pairs(_G) do
+		if type(global_key) == "string" and (string.find(global_key, "zhopa2_") or string.find(global_key, "ZHOPA2")) then
+			if global_key ~= "zhopa2_mcm_schema" and global_key ~= "zhopa2_mcm" and global_key ~= "ui_mcm" then
+				if type(global_val) == "table" then
+					printf("DISABLED MODULE: _G.%s", global_key)
+					for internal_key, internal_val in pairs(global_val) do
+						if type(internal_val) == "function" then
+							global_val[internal_key] = function(...) return nil end
+						elseif type(internal_val) == "table" then
+							global_val[internal_key] = {}
+						end
+					end
+				elseif type(global_val) == "function" then
+					_G[global_key] = function(...) return nil end
+				end
+			end
+		end
+	end
+
+	local runtime_p = rawget(_G, "zhopa2_runtime_patches")
+	if runtime_p and UnregisterScriptCallback then
+		printf("Unregistering background update loops...")
+		pcall(UnregisterScriptCallback, "on_game_load", runtime_p._on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", runtime_p._actor_on_first_update)
+		pcall(UnregisterScriptCallback, "actor_on_update", runtime_p._actor_on_update)
+	end
+
+	if package and package.loaded then
+		for k, v in pairs(package.loaded) do
+			if type(k) == "string" and string.find(k, "zhopa") then
+				if k ~= "zhopa2_mcm_schema" and k ~= "zhopa2_mcm" then
+					package.loaded[k] = false
+				end
+			end
+		end
+	end
+
+	master_purge_fired = true
+	printf("SUCCESS: Your ZHOPA collapsed. Game running on vanilla logic.")
+	printf("====================================================")
+	
+	if db and db.actor then
+		news_manager.send_tip(db.actor, "Zhopa A-Life is now disabled. Create a NEW SAVE.", nil, "swiss_knife", 10000)
+	end
+end
+
+function on_mcm_option_change()
+	if ui_mcm and type(ui_mcm.get) == "function" and not master_purge_fired then
+		local enabled = ui_mcm.get("zhopa2/general/enabled")
+		if enabled == false then
+			printf("Toggle switch detected as OFF. Invoking uninstallation...")
+			execute_absolute_global_purge()
+		end
+	end
+end
+
+local function deploy_permanent_sandbox_proxy()
+	if _G.obj == nil then
+		_G.obj = {
+			clsid = function() return -1 end,
+			id = function() return 0 end,
+			alive = function() return false end
+		}
+	end
+
+	local vanilla_squad = rawget(_G, "sim_squad_scripted")
+	if vanilla_squad and type(vanilla_squad.get_script_target) == "function" then
+		local native_target_fn = vanilla_squad.get_script_target
+		vanilla_squad.get_script_target = function(self, ...)
+			if _G.obj == nil or type(_G.obj.clsid) ~= "function" then
+				_G.obj = { clsid = function() return -1 end }
+			end
+			local ok, res = pcall(native_target_fn, self, ...)
+			return ok and res or nil
+		end
+	end
+end
+
 function on_game_start()
+	deploy_permanent_sandbox_proxy()
+	
+	if RegisterScriptCallback then
+		RegisterScriptCallback("on_option_change", on_mcm_option_change)
+	end
+
 	local rt = runtime_patches()
 	if rt and type(rt.on_game_start) == "function" then
 		return rt.on_game_start()
